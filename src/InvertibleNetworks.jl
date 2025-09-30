@@ -2,9 +2,49 @@
 # Date: January 2020
 # Copyright: Georgia Institute of Technology, 2020
 
+"""
+    InvertibleNetworks
+
+Building blocks for invertible neural networks in Julia.
+
+This package provides memory-efficient building blocks for invertible neural networks
+with hand-derived gradients, Jacobians, and log-determinants. It includes support
+for Flux integration, Zygote and ChainRules automatic differentiation, and GPU support.
+
+## Key Features
+
+- Memory efficient building blocks for invertible neural networks
+- Hand-derived gradients, Jacobians J, and log|J|
+- Flux integration with support for Zygote and ChainRules
+- GPU support via CuArray
+- Various examples of invertible neural networks, normalizing flows, 
+  variational inference, and uncertainty quantification
+
+## Main Components
+
+- **Layers**: ActNorm, Conv1x1, CouplingLayerGlow, CouplingLayerHINT, etc.
+- **Networks**: NetworkGlow, NetworkHINT, NetworkHyperbolic, etc.
+- **Utilities**: Parameter management, objective functions, dimensionality operations
+
+## Quick Start
+
+```julia
+using InvertibleNetworks, Flux
+
+# Create a simple activation normalization layer
+an = ActNorm(10; logdet=true)
+
+# Forward pass
+X = randn(Float32, 64, 64, 10, 4)
+Y, logdet = an.forward(X)
+
+# Inverse pass
+X_reconstructed = an.inverse(Y)
+```
+"""
 module InvertibleNetworks
 
-# Dependencies
+# Core dependencies
 using LinearAlgebra, Random
 using Statistics, Wavelets
 using JOLI
@@ -17,9 +57,7 @@ import LinearAlgebra.dot, LinearAlgebra.norm, LinearAlgebra.adjoint
 import Flux.glorot_uniform
 import CUDA: CuArray
 
-
 export clear_grad!, glorot_uniform
-
 
 # Getters for DenseConvDims fields
 # (need to redefine here as they are not public methods in NNlib)
@@ -28,13 +66,33 @@ kernel_size(::DenseConvDims{N,K,S,P,D}) where {N,K,S,P,D} = K
 channels_in(dcd::DenseConvDims{N,K,S,P,D}) where {N,K,S,P,D} = dcd.channels_in
 channels_out(dcd::DenseConvDims{N,K,S,P,D}) where {N,K,S,P,D} = dcd.channels_out
 
-function DCDims(X::AbstractArray{T, N}, W::AbstractArray{T, N}; stride=1, padding=1, nc=nothing) where {T, N}
+"""
+    dense_conv_dims(X::AbstractArray{T, N}, W::AbstractArray{T, N}; 
+                    stride=1, padding=1, nc=nothing) where {T, N}
+
+Create DenseConvDims for convolution operations.
+
+# Arguments
+- `X`: Input tensor
+- `W`: Weight tensor  
+- `stride`: Stride for convolution (default: 1)
+- `padding`: Padding for convolution (default: 1)
+- `nc`: Number of channels (default: inferred from W)
+
+# Returns
+- `DenseConvDims` object for the convolution operation
+"""
+function dense_conv_dims(X::AbstractArray{T, N}, W::AbstractArray{T, N}; 
+                        stride=1, padding=1, nc=nothing) where {T, N}
     sw = size(W)
     isnothing(nc) && (nc = sw[N-1])
     sx = (size(X)[1:N-2]..., nc, size(X)[end])
-    return DenseConvDims(sx, sw; stride=Tuple(stride for i=1:N-2), padding=Tuple(padding for i=1:N-2))
+    return DenseConvDims(sx, sw; stride=Tuple(stride for i=1:N-2), 
+                        padding=Tuple(padding for i=1:N-2))
 end
 
+# Legacy alias for backward compatibility
+const DCDims = dense_conv_dims
 
 # Utils
 include("utils/parameter.jl")
@@ -79,7 +137,7 @@ include("networks/summarized_net.jl")
 # Jacobians
 include("utils/jacobian.jl")
 
-# gpu
+# GPU utilities
 include("utils/compute_utils.jl")
 
 end

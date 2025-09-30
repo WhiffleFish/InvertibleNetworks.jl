@@ -3,7 +3,7 @@
 # Date: October 2020
 
 using InvertibleNetworks, LinearAlgebra, Test, Random
-Random.seed!(11)
+Random.seed!(12)
 
 # Define network
 nx = 64
