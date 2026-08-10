@@ -25,7 +25,7 @@ export FluxBlock
 
  *Trainable parameters:*
 
- - Network parameters given by `Flux.parameters(model)`
+ - Network parameters given by `Flux.trainables(model)`
 
  See also:  [`Chain`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
@@ -34,7 +34,7 @@ mutable struct FluxBlock <: NeuralNetLayer
     params::Array{Parameter, 1}
 end
 
-@Flux.functor FluxBlock
+Flux.@layer FluxBlock trainable=(params,)
 
 #######################################################################################################################
 # Constructor
@@ -42,13 +42,13 @@ end
 function FluxBlock(model::Chain)
 
     # Collect Flux parameters
-    model_params = Flux.params(model)
-    nparam = length(model_params.order)
+    model_params = Flux.trainables(model)
+    nparam = length(model_params)
     params = Array{Parameter}(undef, nparam)
 
     # Create InvertibleNetworks parameter
     for j=1:nparam
-        params[j] = Parameter(model_params.order[j])
+        params[j] = Parameter(model_params[j])
     end
     return FluxBlock(model, params)
 end
@@ -57,28 +57,36 @@ end
 #######################################################################################################################
 # Functions
 
-# Forward 
+# Forward
 forward(X::AbstractArray{T, N}, FB::FluxBlock) where {T, N} = FB.model(X)
+
+
+# Gradients of a Flux model come back as a plain (named) tuple, which is walked with
+# the default functor walk rather than the model's `trainable`. Pairing the two flat
+# lists positionally would desynchronize for any layer whose `trainable` drops a
+# numeric field, so look each gradient up by the key path of its parameter instead.
+function model_gradients(model, model_grad)
+    return [Flux.Functors.getkeypath(model_grad, path) for (path, _) in Flux.trainables(model; path=true)]
+end
 
 
 # Backward 2D
 function backward(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, FB::FluxBlock; set_grad::Bool=true) where {T, N}
     
-    # Backprop using Zygote
-    θ = Flux.params(X, FB.model)
-    back = Flux.Zygote.pullback(() -> FB.model(X), θ)[2]
-    grad = back(ΔY)
+    # Differentiate explicitly with respect to both the Flux model and input.
+    _, back = Flux.pullback((model, input) -> model(input), FB.model, X)
+    model_grad, ΔX = back(ΔY)
+    param_grads = model_gradients(FB.model, model_grad)
 
     # Set gradients
-    ΔX = grad[θ[1]]
     if set_grad
         for j=1:length(FB.params)
-            FB.params[j].grad = grad[θ[j+1]]
+            FB.params[j].grad = param_grads[j]
         end
     else
         Δθ = Array{Parameter, 1}(undef, length(FB.params))
         for j=1:length(FB.params)
-            Δθ[j] = grad[θ[j+1]]
+            Δθ[j] = Parameter(param_grads[j])
         end
     end
 
@@ -118,10 +126,10 @@ function get_params(FB::FluxBlock)
 end
 
 function set_params!(FB::FluxBlock, θ::Array{Parameter, 1})
-    model_params = Flux.params(FB.model)
-    nparams = length(model_params.order)
+    model_params = Flux.trainables(FB.model)
+    nparams = length(model_params)
     for j=1:nparams
-        model_params.order[j] .= θ[j].data
+        model_params[j] .= θ[j].data
         FB.params[j].data = θ[j].data
         FB.params[j].grad = θ[j].grad
     end

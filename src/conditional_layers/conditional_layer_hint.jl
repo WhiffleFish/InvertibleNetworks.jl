@@ -61,7 +61,7 @@ mutable struct ConditionalLayerHINT <: NeuralNetLayer
     is_reversed::Bool
 end
 
-@Flux.functor ConditionalLayerHINT
+Flux.@layer ConditionalLayerHINT
 
 # 2D Constructor from input dimensions
 function ConditionalLayerHINT(n_in::Int64, n_hidden::Int64; k1=3, k2=3, p1=1, p2=1, s1=1, s2=1,

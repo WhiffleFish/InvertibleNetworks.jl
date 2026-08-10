@@ -67,7 +67,7 @@ mutable struct NetworkMultiScaleConditionalHINT <: InvertibleNetwork
     squeezer::Squeezer
 end
 
-@Flux.functor NetworkMultiScaleConditionalHINT
+Flux.@layer NetworkMultiScaleConditionalHINT
 
 # Constructor
 function NetworkMultiScaleConditionalHINT(n_in::Int64, n_hidden::Int64, L::Int64, K::Int64;

@@ -32,7 +32,10 @@ L = 3 # RealNVP multiscale layers
 K = 4 # Coupling layers per scale
 n_hidden = 32 # Hidden channels in coupling layers' neural network
 G = NetworkConditionalGlow(num_params, num_obs, n_hidden,  L, K;);
-opt = ADAM(4f-3)
+Params = get_params(G)
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 
 # Training logs 
 loss_l2   = []; logdet_train = [];
@@ -54,8 +57,9 @@ for e=1:n_epochs # epoch loop
         G.backward(Zx / batch_size, Zx, Zy)
 
         # Update parameters of flow
-        for p in get_params(G) 
-          Flux.update!(opt,p.data,p.grad)
+        isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(4f-3), p.data) for p in Params])
+        for (opt_state, p) in zip(opt_states, Params)
+          Flux.update!(opt_state, p.data, p.grad)
         end; 
         clear_grad!(G)
 
@@ -115,4 +119,3 @@ subplot(3,1,3); title("Total Objective")
 plot(loss_l2 + logdet_train); 
 xlabel("Parameter Update") ;
 tight_layout()
-

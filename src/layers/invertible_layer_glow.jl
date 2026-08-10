@@ -67,7 +67,7 @@ struct CouplingLayerGlow <: NeuralNetLayer
     activation::ActivationFunction
 end
 
-@Flux.functor CouplingLayerGlow
+Flux.@layer CouplingLayerGlow
 
 # Constructor from 1x1 convolution and residual block
 function CouplingLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())

@@ -12,7 +12,7 @@ struct ComposedInvertibleNetwork <: InvertibleNetwork
     npars::Array{Int64, 1}
 end
 
-@Flux.functor ComposedInvertibleNetwork
+Flux.@layer ComposedInvertibleNetwork
 
 
 ## Constructors

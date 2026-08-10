@@ -6,7 +6,6 @@ using Pkg
 Pkg.add("InvertibleNetworks"); Pkg.add("Flux"); Pkg.add("PyPlot");
 
 using LinearAlgebra, InvertibleNetworks, PyPlot, Flux, Random
-import Flux.Optimise.update!
 
 # Random seed
 Random.seed!(11)
@@ -91,7 +90,10 @@ end
 
 # Training
 maxiter = 1000
-opt = Flux.Optimiser(Flux.ExpDecay(1f-3, .9, 50, 0.), Flux.ADAM(1f-3))
+base_lr = 1f-3
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 
 fval = zeros(Float32, maxiter)
 
@@ -103,9 +105,10 @@ for j=1:maxiter
     mod(j, 10) == 0 && (print("Iteration: ", j, "; f = ", fval[j], "\n"))
 
     # Update params
-    for p in Params
-        update!(opt, p.data, p.grad)
-        update!(lr_decay_fn, p.data, p.grad)
+    isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(base_lr), p.data) for p in Params])
+    mod(j, 50) == 0 && foreach(state -> Flux.adjust!(state, base_lr * 0.9f0^(j ÷ 50)), opt_states)
+    for (opt_state, p) in zip(opt_states, Params)
+        Flux.update!(opt_state, p.data, p.grad)
     end
     clear_grad!(Params)
 

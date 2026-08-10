@@ -60,7 +60,9 @@ end
 
 # Training
 maxiter = 2000
-opt = Flux.ADAM(1f-3)
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 fval = zeros(Float32, maxiter)
 
 for j=1:maxiter
@@ -70,8 +72,9 @@ for j=1:maxiter
     fval[j] = loss(X)[1]
 
     # Update params
-    for p in Params
-        Flux.update!(opt, p.data, p.grad)
+    isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(1f-3), p.data) for p in Params])
+    for (opt_state, p) in zip(opt_states, Params)
+        Flux.update!(opt_state, p.data, p.grad)
     end
     clear_grad!(Params)
 end
@@ -136,7 +139,10 @@ end
 
 # Training
 maxiter = 1000
-opt = Flux.ADAM(1f-3)
+Params = get_params(H)
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 fval = zeros(Float32, maxiter)
 
 for j=1:maxiter
@@ -149,8 +155,9 @@ for j=1:maxiter
     fval[j] = loss(H, X, Y)[1]
 
     # Update params
-    for p in get_params(H)
-        Flux.update!(opt, p.data, p.grad)
+    isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(1f-3), p.data) for p in Params])
+    for (opt_state, p) in zip(opt_states, Params)
+        Flux.update!(opt_state, p.data, p.grad)
     end
     clear_grad!(H)
 end

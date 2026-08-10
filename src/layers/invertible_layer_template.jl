@@ -25,7 +25,7 @@ struct AffineLayer <: NeuralNetLayer
 end
 
 # Functor the layer for gpu/cpu offloading
-@Flux.functor AffineLayer
+Flux.@layer AffineLayer
 
 # The constructor builds and returns a new network layer for given input dimensions.
 function AffineLayer(nx, ny, nc; logdet=false)

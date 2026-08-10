@@ -2,7 +2,6 @@
 
 
 using InvertibleNetworks, LinearAlgebra, Flux
-import Flux.Optimise.update!
 
 device = InvertibleNetworks.CUDA.functional() ? gpu : cpu
 

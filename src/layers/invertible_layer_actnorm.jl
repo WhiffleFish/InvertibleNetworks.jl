@@ -47,7 +47,7 @@ mutable struct ActNorm <: NeuralNetLayer
     is_reversed::Bool
 end
 
-@Flux.functor ActNorm
+Flux.@layer ActNorm
 
 # Constructor: Initialize with nothing
 function ActNorm(k; logdet=false)

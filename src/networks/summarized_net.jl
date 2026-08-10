@@ -36,7 +36,7 @@ struct SummarizedNet <: InvertibleNetwork
 	sum_net
 end
 
-@Flux.functor SummarizedNet
+Flux.@layer SummarizedNet
 
 # Forward pass 
 function forward(X::AbstractArray{T, N}, Y::AbstractArray{T, N}, S::SummarizedNet) where {T, N}

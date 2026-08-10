@@ -63,7 +63,7 @@ struct NetworkLoop <: InvertibleNetwork
     Ψ::Function
 end
 
-@Flux.functor NetworkLoop
+Flux.@layer NetworkLoop
 
 # 2D Constructor
 function NetworkLoop(n_in, n_hidden, maxiter, Ψ; k1=4, k2=3, p1=0, p2=1, s1=4, s2=1, type="additive", ndims=2, activation::ActivationFunction=SigmoidLayer())

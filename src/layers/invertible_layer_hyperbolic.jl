@@ -62,7 +62,7 @@ struct HyperbolicLayer <: NeuralNetLayer
     action
 end
 
-@Flux.functor HyperbolicLayer
+Flux.@layer HyperbolicLayer
 
 scale_a = Dict(0 => 1, 1 => 1/2, -1 => 2, "same" => 1)
 

@@ -15,7 +15,7 @@ array_of_array(::CuArray, args...) = Array{CuArray}(undef, args...)
 
 # for 1x1 Conv
 gemm_outer!(out::Matrix{T}, tmp::Vector{T}, v::Vector{T}) where T = LinearAlgebra.BLAS.gemm!('N', 'T', T(1), tmp, v, T(1), out)
-gemm_outer!(out::CuMatrix{T}, tmp::CuVector{T}, v::CuVector{T}) where T = CUDA.CUBLAS.gemm!('N', 'T', T(1), tmp, v, T(1), out)
+gemm_outer!(out::CuMatrix{T}, tmp::CuVector{T}, v::CuVector{T}) where T = CUDA.cuBLAS.gemm!('N', 'T', T(1), tmp, v, T(1), out)
 
 function chain_lr(x::AbstractMatrix{T}, vi::Vararg{AbstractVector{T}, N}) where {T, N}
     out = T(1) .* x

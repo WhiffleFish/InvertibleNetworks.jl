@@ -5,7 +5,6 @@
 
 using InvertibleNetworks, LinearAlgebra, Test
 using Flux, JOLI
-import Flux.Optimise.update!
 
 # Input
 nx = 32
@@ -50,10 +49,9 @@ s_in = randn(Float32, nx, ny, nz, n_in-1, batchsize)
 @test isapprox(norm(s_inv - s_in)/norm(s_inv), 0f0, atol=1e-5)
 
 # Update using Flux optimizer
-opt = Flux.ADAM()
 P = get_params(L)
-for p in P
-    update!(opt, p.data, p.grad)
+opt_states = [Flux.setup(Adam(), p.data) for p in P]
+for (opt_state, p) in zip(opt_states, P)
+    Flux.update!(opt_state, p.data, p.grad)
 end
 clear_grad!(L)
-

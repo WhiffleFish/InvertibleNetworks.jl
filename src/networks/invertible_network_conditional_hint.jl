@@ -55,7 +55,7 @@ mutable struct NetworkConditionalHINT <: InvertibleNetwork
     is_reversed::Bool
 end
 
-@Flux.functor NetworkConditionalHINT
+Flux.@layer NetworkConditionalHINT
 
 # Constructor
 function NetworkConditionalHINT(n_in, n_hidden, depth; k1=3, k2=3, p1=1, p2=1, s1=1, s2=1, logdet=true, ndims=2,activation::ActivationFunction=SigmoidLayer(), )

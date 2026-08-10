@@ -72,7 +72,7 @@ struct NetworkConditionalGlow <: InvertibleNetwork
     split_scales::Bool
 end
 
-@Flux.functor NetworkConditionalGlow
+Flux.@layer NetworkConditionalGlow
 
 # Constructor
 function NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; freeze_conv=false,  split_scales=false,  rb_activation::ActivationFunction=ReLUlayer(), k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())

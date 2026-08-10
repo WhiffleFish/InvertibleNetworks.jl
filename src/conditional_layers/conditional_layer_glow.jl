@@ -65,7 +65,7 @@ struct ConditionalLayerGlow <: NeuralNetLayer
     activation::ActivationFunction
 end
 
-@Flux.functor ConditionalLayerGlow
+Flux.@layer ConditionalLayerGlow
 
 # Constructor from 1x1 convolution and residual block
 function ConditionalLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())

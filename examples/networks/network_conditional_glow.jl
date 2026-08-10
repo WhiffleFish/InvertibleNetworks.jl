@@ -37,10 +37,10 @@ end
 f = loss(G, X, Y)
 
 # Update weights
-opt = Flux.ADAM()
 Params = get_params(G)
-for p in Params
-    Flux.update!(opt, p.data, p.grad)
+opt_states = [Flux.setup(Adam(), p.data) for p in Params]
+for (opt_state, p) in zip(opt_states, Params)
+    Flux.update!(opt_state, p.data, p.grad)
 end
 clear_grad!(G)
 
@@ -61,9 +61,9 @@ G_3d = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; ndims=3)  |> device
 f = loss(G_3d, X_3d, Y_3d) 
 
 # Update weights
-opt = Flux.ADAM()
 Params = get_params(G_3d)
-for p in Params
-    Flux.update!(opt, p.data, p.grad)
+opt_states = [Flux.setup(Adam(), p.data) for p in Params]
+for (opt_state, p) in zip(opt_states, Params)
+    Flux.update!(opt_state, p.data, p.grad)
 end
 clear_grad!(G_3d)

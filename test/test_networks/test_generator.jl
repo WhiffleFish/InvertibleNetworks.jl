@@ -3,7 +3,6 @@
 # Date: January 2020
 
 using LinearAlgebra, InvertibleNetworks, Flux, Test, Random
-import Flux.Optimise.update!
 Random.seed!(11)
 
 # Target distribution

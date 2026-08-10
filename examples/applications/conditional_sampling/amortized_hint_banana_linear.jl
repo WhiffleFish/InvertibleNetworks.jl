@@ -11,7 +11,6 @@ using Pkg
 Pkg.add("InvertibleNetworks"); Pkg.add("Flux"); Pkg.add("PyPlot")
 
 using LinearAlgebra, InvertibleNetworks, PyPlot, Flux, Random, Test
-import Flux.Optimise.update!
 
 # Random seed
 Random.seed!(98)
@@ -47,7 +46,11 @@ end
 
 # Training
 maxiter = 1000
-opt = Flux.Optimiser(Flux.ExpDecay(1f-3, .9, 100, 0.), Flux.ADAM(1f-3))
+base_lr = 1f-3
+Params = get_params(H)
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 fval = zeros(Float32, maxiter)
 
 for j=1:maxiter
@@ -60,8 +63,10 @@ for j=1:maxiter
     mod(j, 10) == 0 && (print("Iteration: ", j, "; f = ", fval[j], "\n"))
 
     # Update params
-    for p in get_params(H)
-        update!(opt, p.data, p.grad)
+    isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(base_lr), p.data) for p in Params])
+    mod(j, 100) == 0 && foreach(state -> Flux.adjust!(state, base_lr * 0.9f0^(j ÷ 100)), opt_states)
+    for (opt_state, p) in zip(opt_states, Params)
+        Flux.update!(opt_state, p.data, p.grad)
     end
     clear_grad!(H)
 end
@@ -116,5 +121,4 @@ ax9.set_xlim([-3.5, 3.5]); ax9.set_ylim([-3.5, 3.5])
 ax10 = subplot(2,5,10); plot(Zx[1, 1, 1, :], Zx[1, 1, 2, :], "."); 
 plot(Zy_fixed[1, 1, 1, :], Zy_fixed[1, 1, 2, :], "r."); title(L"Latent space: $zx \sim \hat{p}_{zx}$")
 ax10.set_xlim([-3.5, 3.5]); ax10.set_ylim([-3.5, 3.5])
-
 

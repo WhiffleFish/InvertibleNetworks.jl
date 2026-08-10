@@ -48,7 +48,7 @@ struct Conv1x1 <: NeuralNetLayer
     freeze::Bool
 end
 
-@Flux.functor Conv1x1
+Flux.@layer Conv1x1
 
 # Constructor with random initializations
 function Conv1x1(k;freeze=false, logdet=false)

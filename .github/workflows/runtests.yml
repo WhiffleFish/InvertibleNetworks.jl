@@ -19,16 +19,16 @@ jobs:
       fail-fast: false
 
       matrix:
-        version: ['1.6', '1.7', '1.8', '1.9', '1.10']
+        version: ['1.10', '1.11', '1.12']
         tests: ["basics", "layers", "networks"]
         os: [ubuntu-latest]
 
     steps:
       - name: Checkout InvertibleNetworks.jl
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup julia
-        uses: julia-actions/setup-julia@v1
+        uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
 
@@ -40,19 +40,13 @@ jobs:
         uses: julia-actions/julia-buildpkg@latest
 
       - name: Run tests
-        id: test
-        continue-on-error: true  
-        uses: julia-actions/julia-runtest@latest
-
-      - name: Retry tests once if failed
-        if: steps.test.outcome=='failure' 
         uses: julia-actions/julia-runtest@latest
 
       - name: Run simple example
         run: julia --project examples/layers/layer_actnorm.jl
 
       - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v1
+      - uses: codecov/codecov-action@v5
         with:
           file: lcov.info
 
@@ -66,15 +60,15 @@ jobs:
       fail-fast: false
 
       matrix:
-        version: ['1.10']
+        version: ['1.10', '1.12']
         tests: ["basics", "layers", "networks"]
 
     steps:
       - name: Checkout InvertibleNetworks.jl
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup julia
-        uses: julia-actions/setup-julia@v1
+        uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
 
@@ -86,19 +80,12 @@ jobs:
         uses: julia-actions/julia-buildpkg@latest
 
       - name: Run tests
-        id: test
-        continue-on-error: true  
-        uses: julia-actions/julia-runtest@latest
-
-      - name: Retry tests once if failed
-        if: steps.test.outcome=='failure' 
         uses: julia-actions/julia-runtest@latest
 
       - name: Run simple example
         run: julia --project examples/layers/layer_actnorm.jl
 
       - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v1
+      - uses: codecov/codecov-action@v5
         with:
           file: lcov.info
-

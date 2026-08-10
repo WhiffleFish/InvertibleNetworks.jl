@@ -3,7 +3,6 @@
 # Date: January 2020
 
 using InvertibleNetworks, LinearAlgebra, Flux
-import Flux.Optimise.update!
 
 device = InvertibleNetworks.CUDA.functional() ? gpu : cpu
 
@@ -35,9 +34,9 @@ f = loss(X)
 @time loss(X)
 
 # Update weights
-opt = Flux.ADAM()
 Params = get_params(G)
-for p in Params
-    update!(opt, p.data, p.grad)
+opt_states = [Flux.setup(Adam(), p.data) for p in Params]
+for (opt_state, p) in zip(opt_states, Params)
+    Flux.update!(opt_state, p.data, p.grad)
 end
 clear_grad!(G)

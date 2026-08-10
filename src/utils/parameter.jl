@@ -39,7 +39,7 @@ size(x::Parameter) = size(x.data)
 length(x::Parameter) = length(x.data)
 
 
-@Flux.functor Parameter
+Flux.@layer Parameter trainable=(data,)
 
 """
     clear_grad!(NL::NeuralNetLayer)

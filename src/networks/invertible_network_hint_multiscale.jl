@@ -63,7 +63,7 @@ struct NetworkMultiScaleHINT <: InvertibleNetwork
     split_scales::Bool
 end
 
-@Flux.functor NetworkMultiScaleHINT
+Flux.@layer NetworkMultiScaleHINT
 
 # Constructor
 function NetworkMultiScaleHINT(n_in::Int64, n_hidden::Int64, L::Int64, K::Int64;

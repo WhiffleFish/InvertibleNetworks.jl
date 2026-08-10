@@ -42,7 +42,7 @@ struct AffineLayer <: NeuralNetLayer
     logdet::Bool
 end
 
-@Flux.functor AffineLayer
+Flux.@layer AffineLayer
 
 # Constructor: Initialize with nothing
 function AffineLayer(nx::Int64, ny::Int64, nc::Int64; logdet=false)

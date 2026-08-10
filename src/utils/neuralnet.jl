@@ -132,10 +132,15 @@ function set_params!(N::Invertible, θnew::Array{Any, 1})
     set_params!(get_params(N), θnew)
 end
 
+# Return the trainable arrays in the same stable order as `get_params`.
+# The ChainRules rule for this function maps their cotangents back onto the
+# nested model structure expected by Flux's explicit optimiser interface.
+parameter_data(net::Invertible) = getfield.(get_params(net), :data)
+
 # Make invertible nets callable objects
-(net::Invertible)(X::AbstractArray{T,N} where {T, N}) = forward_net(net, X, getfield.(get_params(net), :data))
+(net::Invertible)(X::AbstractArray{T,N} where {T, N}) = forward_net(net, X, parameter_data(net))
 forward_net(net::Invertible, X::AbstractArray{T,N}, ::Any) where {T, N} = net.forward(X)
 
 # Make conditional invertible nets callable objects
-(net::Invertible)(X::AbstractArray{T,N}, Y::AbstractArray{T,N}) where {T, N} = forward_net(net, X, Y, getfield.(get_params(net), :data))
+(net::Invertible)(X::AbstractArray{T,N}, Y::AbstractArray{T,N}) where {T, N} = forward_net(net, X, Y, parameter_data(net))
 forward_net(net::Invertible, X::AbstractArray{T,N}, Y::AbstractArray{T,N}, ::Any) where {T, N} = net.forward(X,Y)

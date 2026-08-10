@@ -12,13 +12,17 @@ G = G |> device;
 # Update network parameters by training
 batch_size = 4
 X = randn(32,32,n_chan_params,batch_size)|> device;
-opt = ADAM()
 
 Zx, lgdet = G.forward(X );
 G.backward(Zx / batch_size, Zx);
 
-for p in get_params(G) 
-	Flux.update!(opt,p.data,p.grad)
+# Set up the optimizer after the first forward pass: ActNorm initializes its parameters
+# lazily, and Flux.setup would silently skip any parameter whose data is still nothing.
+Params = get_params(G)
+opt_states = [Flux.setup(Adam(), p.data) for p in Params]
+
+for (opt_state, p) in zip(opt_states, Params)
+	Flux.update!(opt_state, p.data, p.grad)
 end
 
 # Save network parameters using BSON 

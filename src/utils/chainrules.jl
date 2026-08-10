@@ -1,9 +1,48 @@
 using ChainRulesCore
 export logdetjac, getrrule
-import ChainRulesCore: frule, rrule, @non_differentiable
+import ChainRulesCore: AbstractZero, NoTangent, Tangent, ZeroTangent,
+                       frule, rrule, unthunk, @non_differentiable
 
 @non_differentiable get_params(::Invertible)
 @non_differentiable get_params(::Reversed)
+
+# Construct a structural cotangent for Flux/Optimisers from the flat gradients
+# produced by the hand-written backward passes. Only `Parameter.data` is
+# trainable; cached gradients and all non-parameter metadata are excluded.
+_parameter_tangent(::Any, ::IdDict{Parameter,Any}) = NoTangent()
+
+function _parameter_tangent(p::Parameter, grads::IdDict{Parameter,Any})
+    return Tangent{Parameter}(; data=get(grads, p, ZeroTangent()), grad=NoTangent())
+end
+
+_parameter_tangent(A::AbstractArray{<:Parameter}, grads::IdDict{Parameter,Any}) =
+    map(p -> _parameter_tangent(p, grads), A)
+
+_parameter_tangent(::Nothing, ::IdDict{Parameter,Any}) = NoTangent()
+
+_parameter_tangent(A::AbstractArray{<:Union{Invertible,Nothing}}, grads::IdDict{Parameter,Any}) =
+    map(x -> _parameter_tangent(x, grads), A)
+
+function _parameter_tangent(net::Invertible, grads::IdDict{Parameter,Any})
+    names = fieldnames(typeof(net))
+    values = map(name -> _parameter_tangent(getfield(net, name), grads), names)
+    backing = NamedTuple{names}(values)
+    return Tangent{typeof(net)}(; backing...)
+end
+
+function ChainRulesCore.rrule(::typeof(parameter_data), net::Invertible)
+    params = get_params(net)
+    data = getfield.(params, :data)
+
+    function parameter_data_pullback(data_cotangent)
+        data_cotangent = unthunk(data_cotangent)
+        data_cotangent isa AbstractZero && return NoTangent(), ZeroTangent()
+        grads = IdDict{Parameter,Any}(p => unthunk(g) for (p, g) in zip(params, data_cotangent))
+        return NoTangent(), _parameter_tangent(net, grads)
+    end
+
+    return data, parameter_data_pullback
+end
 ## Tape types and utilities
 
 """
@@ -102,11 +141,15 @@ end
 
 ## Chain rules for invertible networks
 # General pullback function
-function pullback(net::Invertible, ΔY::AbstractArray{T,N};
-                  state::InvertibleOperationsTape=GLOBAL_STATE_INVOPS) where {T, N}
+function pullback(net::Invertible, ΔY;
+                  state::InvertibleOperationsTape=GLOBAL_STATE_INVOPS)
 
     # Check state coherency
     check_coherence(state, net)
+
+    # Current ChainRules/NNlib may return a lazy cotangent. Materialize it before
+    # passing it to the hand-written array-based backward methods.
+    ΔY = unthunk(ΔY)
 
     # Zygote feeds back wrong type ΔY in some cases so convert back if needed
     T2 = typeof(current(state))

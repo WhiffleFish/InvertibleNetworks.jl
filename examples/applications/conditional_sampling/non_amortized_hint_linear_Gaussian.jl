@@ -8,7 +8,7 @@ Pkg.add("Distributions"); Pkg.add("Printf")
 
 using InvertibleNetworks, LinearAlgebra, Test
 using Distributions
-import Flux.Optimise.update!, Flux
+import Flux
 using PyPlot
 using Printf
 using Random
@@ -107,7 +107,9 @@ end
 
 # Optimizer
 η = 0.01
-opt = Flux.Optimiser(Flux.ExpDecay(η, .3, 2000, 0.), Flux.ADAM(η))
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 
 # Loss function
 function loss(z_in, y_in)
@@ -137,9 +139,10 @@ for j = 1:max_itr
 	mod(j, 10) == 0 && (print("Iteration: ", j, "; f = ", fval[j], "\n"))
 
 	# Update params
-	for p in Params
-		update!(opt, p.data, p.grad)
-        update!(lr_decay_fn, p.data, p.grad)
+	isnothing(opt_states) && (global opt_states = [Flux.setup(Flux.Adam(η), p.data) for p in Params])
+	mod(j, 2000) == 0 && foreach(state -> Flux.adjust!(state, η * 0.3^(j ÷ 2000)), opt_states)
+	for (opt_state, p) in zip(opt_states, Params)
+		Flux.update!(opt_state, p.data, p.grad)
 	end
 	clear_grad!(Params)
 

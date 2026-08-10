@@ -89,7 +89,10 @@ G = G |> device
 n_batches = cld(n_train, batch_size)
 
 # Optimizer
-opt =  ADAM(lr)
+Params = get_params(G)
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 
 # Training logs
 loss = [];
@@ -111,8 +114,9 @@ for e=1:n_epochs
 
 			G.backward((Zx / batch_size)[:], (Zx)[:])	
 
-			for p in get_params(G)
-				Flux.update!(opt,p.data,p.grad)
+			isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(lr), p.data) for p in Params])
+			for (opt_state, p) in zip(opt_states, Params)
+				Flux.update!(opt_state, p.data, p.grad)
 			end
 			clear_grad!(G)
 
@@ -172,4 +176,3 @@ for e=1:n_epochs
 		savefig("test_gen.png");
 	end
 end
-

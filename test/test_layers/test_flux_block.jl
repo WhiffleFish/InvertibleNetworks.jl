@@ -90,3 +90,39 @@ end
 
 @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
 @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###################################################################################################
+# Gradients must stay paired with their parameter for layers that restrict `trainable`.
+#
+# A Flux gradient comes back as a plain named tuple, which is walked with the default
+# functor walk rather than the layer's `trainable`. Pairing the trainable arrays and the
+# gradient leaves positionally desynchronizes as soon as `trainable` drops a numeric
+# field, so `backward` looks each gradient up by its parameter's key path.
+
+struct ScaleShift
+    scale
+    shift
+end
+
+(SS::ScaleShift)(X) = SS.scale .* X .+ SS.shift
+
+# `shift` is declared second on purpose: pairing the two flat lists positionally would
+# hand the gradient of `scale` to `shift`, which this test catches.
+Flux.@layer ScaleShift trainable=(shift,)
+
+n_feat = 4
+batch_partial = 3
+SS = ScaleShift(randn(Float32, n_feat), randn(Float32, n_feat))
+FB_partial = FluxBlock(Chain(SS))
+
+# Only `shift` is trainable, but the gradient tuple carries both `scale` and `shift`
+@test length(FB_partial.params) == 1
+@test FB_partial.params[1].data === SS.shift
+
+X_partial = randn(Float32, n_feat, batch_partial)
+FB_partial.backward(ones(Float32, n_feat, batch_partial), X_partial)
+
+# For f = sum(scale .* X .+ shift): df/dshift is the batch size, while df/dscale would be
+# the row sums of X. Getting the latter here would mean the gradients came back misaligned.
+@test FB_partial.params[1].grad ≈ fill(Float32(batch_partial), n_feat)

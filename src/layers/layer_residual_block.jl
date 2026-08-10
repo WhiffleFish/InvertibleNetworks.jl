@@ -76,7 +76,7 @@ struct ResidualBlock <: NeuralNetLayer
     activation::ActivationFunction
 end
 
-@Flux.functor ResidualBlock
+Flux.@layer ResidualBlock
 
 #######################################################################################################################
 #  Constructors

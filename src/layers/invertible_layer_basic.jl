@@ -65,7 +65,7 @@ mutable struct CouplingLayerBasic <: NeuralNetLayer
     is_reversed::Bool
 end
 
-@Flux.functor CouplingLayerBasic
+Flux.@layer CouplingLayerBasic
 
 # Constructor from 1x1 convolution and residual block
 function CouplingLayerBasic(RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())

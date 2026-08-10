@@ -59,7 +59,7 @@ struct ConditionalResidualBlock <: NeuralNetLayer
     cdims3::DenseConvDims
 end
 
-@Flux.functor ConditionalResidualBlock
+Flux.@layer ConditionalResidualBlock
 
 # Constructor
 function ConditionalResidualBlock(nx1, nx2, nx_in, ny1, ny2, ny_in, n_hidden, batchsize; k1=3, k2=3, p1=1, p2=1, s1=1, s2=1)

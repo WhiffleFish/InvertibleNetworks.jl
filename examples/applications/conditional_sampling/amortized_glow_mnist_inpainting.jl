@@ -89,7 +89,10 @@ n_hidden = 32 # Number of hidden channels in convolutional residual blocks
 G = NetworkConditionalGlow(chan_x, chan_y, n_hidden,  L, K; split_scales=true ) |> device;
 
 # Optimizer
-opt = ADAM(lr)
+Params = get_params(G)
+# Built after the first forward pass: ActNorm initializes its parameters lazily, and
+# Flux.setup would silently skip any parameter whose data is still nothing.
+opt_states = nothing
 
 # Training logs 
 loss_train = []; loss_val = [];
@@ -99,8 +102,9 @@ for e=1:epochs # epoch loop
         ZX, ZY, logdet_i = G.forward(X|> device, Y|> device);
         G.backward(ZX / batch_size, ZX, ZY)
 
-        for p in get_params(G) 
-        	Flux.update!(opt, p.data, p.grad)
+        isnothing(opt_states) && (global opt_states = [Flux.setup(Adam(lr), p.data) for p in Params])
+        for (opt_state, p) in zip(opt_states, Params)
+            Flux.update!(opt_state, p.data, p.grad)
         end; clear_grad!(G) # clear gradients unless you need to accumulate
 
         #Progress meter
@@ -145,5 +149,3 @@ p6 = heatmap(X_post[:,:,1,2];title="Posterior sample",cbar=false,clims = (0, 1),
 
 plot(p1,p2,p3,p4,p5,p6,aspect_ratio=:equal, size=(600,400))
 savefig("posterior_sampling.png")
-
-

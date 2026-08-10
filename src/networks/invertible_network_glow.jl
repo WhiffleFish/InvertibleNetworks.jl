@@ -72,7 +72,7 @@ struct NetworkGlow <: InvertibleNetwork
     logdet::Bool
 end
 
-@Flux.functor NetworkGlow
+Flux.@layer NetworkGlow
 
 # Constructor
 function NetworkGlow(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, freeze_conv=false, split_scales=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())

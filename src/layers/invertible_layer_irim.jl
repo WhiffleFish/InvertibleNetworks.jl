@@ -62,7 +62,7 @@ struct CouplingLayerIRIM <: NeuralNetLayer
     RB::Union{ResidualBlock, FluxBlock}
 end
 
-@Flux.functor CouplingLayerIRIM
+Flux.@layer CouplingLayerIRIM
 
 # 2D Constructor from input dimensions
 function CouplingLayerIRIM(n_in::Int64, n_hidden::Int64;
