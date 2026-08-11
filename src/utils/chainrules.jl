@@ -12,7 +12,7 @@ import ChainRulesCore: AbstractZero, NoTangent, Tangent, ZeroTangent,
 _parameter_tangent(::Any, ::IdDict{Parameter,Any}) = NoTangent()
 
 function _parameter_tangent(p::Parameter, grads::IdDict{Parameter,Any})
-    return Tangent{Parameter}(; data=get(grads, p, ZeroTangent()), grad=NoTangent())
+    return Tangent{typeof(p)}(; data=get(grads, p, ZeroTangent()), grad=NoTangent())
 end
 
 _parameter_tangent(A::AbstractArray{<:Parameter}, grads::IdDict{Parameter,Any}) =
@@ -22,6 +22,9 @@ _parameter_tangent(::Nothing, ::IdDict{Parameter,Any}) = NoTangent()
 
 _parameter_tangent(A::AbstractArray{<:Union{Invertible,Nothing}}, grads::IdDict{Parameter,Any}) =
     map(x -> _parameter_tangent(x, grads), A)
+
+_parameter_tangent(values::Tuple, grads::IdDict{Parameter,Any}) =
+    map(value -> _parameter_tangent(value, grads), values)
 
 function _parameter_tangent(net::Invertible, grads::IdDict{Parameter,Any})
     names = fieldnames(typeof(net))

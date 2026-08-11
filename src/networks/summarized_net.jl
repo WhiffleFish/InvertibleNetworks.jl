@@ -31,9 +31,9 @@ export SummarizedNet
 
  See also: [`ActNorm`](@ref), [`CouplingLayerGlow!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct SummarizedNet <: InvertibleNetwork
-	cond_net::InvertibleNetwork
-	sum_net
+struct SummarizedNet{C<:InvertibleNetwork,S} <: InvertibleNetwork
+	cond_net::C
+	sum_net::S
 end
 
 Flux.@layer SummarizedNet

@@ -51,8 +51,8 @@ export NetworkHyperbolic, NetworkHyperbolic3D
 
  See also: [`CouplingLayer!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkHyperbolic <: InvertibleNetwork
-    HL::AbstractArray{HyperbolicLayer, 1}
+struct NetworkHyperbolic{L<:AbstractVector} <: InvertibleNetwork
+    HL::L
     logdet::Bool
 end
 
@@ -63,12 +63,15 @@ function NetworkHyperbolic(n_in::Int64, architecture::NTuple;
                            k=3, s=1, p=1, logdet=true, α=1f0, ndims=2)#, affine_layer=false)
 
     depth = length(architecture)
-    HL = Array{HyperbolicLayer}(undef, depth)
+    first_layer = HyperbolicLayer(n_in, k, s, p; action=architecture[1][1],
+                                  n_hidden=architecture[1][2], α=α, ndims=ndims)
+    HL = Vector{typeof(first_layer)}(undef, depth)
 
     for j=1:depth
         
         # Hyperbolic layer at level j
-        HL[j] = HyperbolicLayer(n_in, k, s, p; action=architecture[j][1], n_hidden=architecture[j][2], α=α, ndims=ndims)
+        HL[j] = j == 1 ? first_layer : HyperbolicLayer(n_in, k, s, p;
+            action=architecture[j][1], n_hidden=architecture[j][2], α=α, ndims=ndims)
 
         # adjust dimensions
         if architecture[j][1] == 1
@@ -114,7 +117,7 @@ function backward(ΔY_curr::AbstractArray{T, N}, ΔY_new::AbstractArray{T, N}, Y
 end
 
 # Jacobian-related utils
-function jacobian(ΔX_prev::AbstractArray{T, N}, ΔX_curr::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X_prev::AbstractArray{T, N}, X_curr::AbstractArray{T, N}, H::NetworkHyperbolic) where {T, N}
+function jacobian(ΔX_prev::AbstractArray{T, N}, ΔX_curr::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X_prev::AbstractArray{T, N}, X_curr::AbstractArray{T, N}, H::NetworkHyperbolic) where {T, N}
     npars_hl = Int64(length(Δθ)/length(H.HL))
     for j=1:length(H.HL)
         Δθj = Δθ[1+(j-1)*npars_hl:j*npars_hl]

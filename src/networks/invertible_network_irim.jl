@@ -57,34 +57,36 @@ export NetworkLoop, NetworkLoop3D
 
  See also: [`CouplingLayerIRIM`](@ref), [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkLoop <: InvertibleNetwork
-    L::Union{AbstractArray{CouplingLayerIRIM, 1}, AbstractArray{CouplingLayerHINT}}
-    AN::AbstractArray{ActNorm, 1}
-    Ψ::Function
+struct NetworkLoop{Layers<:AbstractVector,Norms<:AbstractVector,F} <: InvertibleNetwork
+    L::Layers
+    AN::Norms
+    Ψ::F
 end
 
 Flux.@layer NetworkLoop
 
 # 2D Constructor
-function NetworkLoop(n_in, n_hidden, maxiter, Ψ; k1=4, k2=3, p1=0, p2=1, s1=4, s2=1, type="additive", ndims=2, activation::ActivationFunction=SigmoidLayer())
+function NetworkLoop(n_in, n_hidden, maxiter, Ψ; k1=4, k2=3, p1=0, p2=1, s1=4, s2=1, type="additive", ndims=2, activation::ActivationFunction=SigmoidLayer(), rb_activation::ActivationFunction=ReLUlayer())
     
-    if type == "additive"
-        L = Array{CouplingLayerIRIM}(undef, maxiter)
+    # `activation` is the coupling activation and only applies to type="HINT";
+    # `CouplingLayerIRIM` is purely additive and has no coupling activation, so the
+    # additive path takes `rb_activation` for its residual block instead. Both default to
+    # the value the underlying layer would have chosen on its own.
+    make_layer = if type == "additive"
+        () -> CouplingLayerIRIM(n_in, n_hidden; k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2,
+                                rb_activation=rb_activation, ndims=ndims)
     elseif type == "HINT"
-        L = Array{CouplingLayerHINT}(undef, maxiter)
+        () -> CouplingLayerHINT(n_in, n_hidden; logdet=false, permute="both", k1=k1, k2=k2,
+                                p1=p1, p2=p2, s1=s1, s2=s2, ndims=ndims, activation=activation)
+    else
+        throw(ArgumentError("Unknown NetworkLoop type: $type"))
     end
 
-    AN = Array{ActNorm}(undef, maxiter)
-    for j=1:maxiter
-        if type == "additive"
-            L[j] = CouplingLayerIRIM(n_in, n_hidden; k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2,activation=activation, ndims=ndims)
-        elseif type == "HINT"
-            L[j] = CouplingLayerHINT(n_in, n_hidden; logdet=false, permute="both", k1=k1, k2=k2, p1=p1, p2=p2,
-                                     s1=s1, s2=s2, ndims=ndims)
-        end
-        AN[j] = ActNorm(1)
-    end
-    
+    # Comprehensions give concretely-typed vectors, so there is no need to build a layer
+    # up front just to read its type off.
+    L = [make_layer() for _ = 1:maxiter]
+    AN = [ActNorm(1) for _ = 1:maxiter]
+
     return NetworkLoop(L, AN, Ψ)
 end
 

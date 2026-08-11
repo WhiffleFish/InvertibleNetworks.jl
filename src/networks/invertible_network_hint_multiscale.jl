@@ -54,10 +54,10 @@ export NetworkMultiScaleHINT, NetworkMultiScaleHINT3D
 
  See also: [`ActNorm`](@ref), [`CouplingLayerHINT!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkMultiScaleHINT <: InvertibleNetwork
-    AN::AbstractArray{ActNorm, 2}
-    CL::AbstractArray{CouplingLayerHINT, 2}
-    X_dims::Union{Array{Tuple, 1}, Nothing}
+struct NetworkMultiScaleHINT{A<:AbstractMatrix,C<:AbstractMatrix,D} <: InvertibleNetwork
+    AN::A
+    CL::C
+    X_dims::D
     L::Int64
     K::Int64
     split_scales::Bool
@@ -69,8 +69,9 @@ Flux.@layer NetworkMultiScaleHINT
 function NetworkMultiScaleHINT(n_in::Int64, n_hidden::Int64, L::Int64, K::Int64;
                                split_scales=false, k1=3, k2=3, p1=1, p2=1, s1=1, s2=1, activation::ActivationFunction=SigmoidLayer(), ndims=2)
 
-    AN = Array{ActNorm}(undef, L, K)
-    CL = Array{CouplingLayerHINT}(undef, L, K)
+    first_AN = ActNorm(n_in * 4; logdet=true)
+    AN = Matrix{typeof(first_AN)}(undef, L, K)
+    CL = nothing
     if split_scales
         X_dims = Array{Tuple}(undef, L-1)
         channel_factor = 2
@@ -82,9 +83,11 @@ function NetworkMultiScaleHINT(n_in::Int64, n_hidden::Int64, L::Int64, K::Int64;
     # Create layers
     for i=1:L
         for j=1:K
-            AN[i, j] = ActNorm(n_in*4; logdet=true)
-            CL[i, j] = CouplingLayerHINT(n_in*4, n_hidden; activation=activation,permute="full", k1=k1, k2=k2, p1=p1, p2=p2,
-                                         s1=s1, s2=s2, logdet=true, ndims=ndims)
+            AN[i, j] = i == 1 && j == 1 ? first_AN : ActNorm(n_in*4; logdet=true)
+            layer = CouplingLayerHINT(n_in*4, n_hidden; activation=activation,permute="full", k1=k1, k2=k2, p1=p1, p2=p2,
+                                      s1=s1, s2=s2, logdet=true, ndims=ndims)
+            isnothing(CL) && (CL = Matrix{typeof(layer)}(undef, L, K))
+            CL[i, j] = layer
         end
         n_in *= channel_factor
     end
@@ -173,7 +176,7 @@ end
 
 
 ## Jacobian-related utils
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X, H::NetworkMultiScaleHINT) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X, H::NetworkMultiScaleHINT) where {T, N}
     if H.split_scales
         X_save = array_of_array(ΔX, H.L-1, 2)
         ΔX_save = array_of_array(ΔX, H.L-1, 2)

@@ -39,56 +39,72 @@ export ActNorm, reset!
 
  See also: [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct ActNorm <: NeuralNetLayer
-    k::Integer
-    s::Parameter
-    b::Parameter
+mutable struct ActNorm{P<:Parameter} <: NeuralNetLayer
+    k::Int64
+    s::P
+    b::P
     logdet::Bool
     is_reversed::Bool
+    initialized::Bool
 end
 
 Flux.@layer ActNorm
 
 # Constructor: Initialize with nothing
 function ActNorm(k; logdet=false)
-    s = Parameter(nothing)
-    b = Parameter(nothing)
-    return ActNorm(k, s, b, logdet, false)
+    s = Parameter(ones(Float32, k))
+    b = Parameter(zeros(Float32, k))
+    return ActNorm(k, s, b, logdet, false, false)
+end
+
+function reset!(AN::ActNorm)
+    fill!(AN.s.data, one(eltype(AN.s.data)))
+    fill!(AN.b.data, zero(eltype(AN.b.data)))
+    AN.s.grad = nothing
+    AN.b.grad = nothing
+    AN.initialized = false
+    return AN
 end
 
 # 2-3D Foward pass: Input X, Output Y
 function forward(X::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, N}
-    isnothing(logdet) ? logdet = (AN.logdet && ~AN.is_reversed) : logdet = logdet
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
-    dims = collect(1:N-1); dims[end] +=1
+    logdet = isnothing(logdet) ? (AN.logdet && ~AN.is_reversed) : logdet
+    return _forward(X, AN, Val(logdet))
+end
+
+function _forward(X::AbstractArray{T, N}, AN::ActNorm, ::Val{logdet}) where {T, N, logdet}
+    inds = channel_indices(Val(N))
+    dims = batch_reduction_dims(Val(N))
 
     # Initialize during first pass such that
     # output has zero mean and unit variance
-    if isnothing(AN.s.data) && !AN.is_reversed
+    if !AN.initialized && !AN.is_reversed
         μ = mean(X; dims=dims)[inds...]
         σ_sqr = var(X; dims=dims)[inds...]
-        AN.s.data = 1 ./ sqrt.(σ_sqr)
-        AN.b.data = -μ ./ sqrt.(σ_sqr)
+        AN.s.data .= 1 ./ sqrt.(σ_sqr)
+        AN.b.data .= -μ ./ sqrt.(σ_sqr)
+        AN.initialized = true
     end
     Y = X .* reshape(AN.s.data, inds...) .+ reshape(AN.b.data, inds...)
 
     # If logdet true, return as second ouput argument
-    logdet ? (return Y, logdet_forward(size(X)[1:N-2]..., AN.s)) : (return Y)
+    return logdet ? (Y, logdet_forward(size(X)[1:N-2]..., AN.s)) : Y
 end
 
 # 2-3D Inverse pass: Input Y, Output X
 function inverse(Y::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (AN.logdet && AN.is_reversed) : logdet = logdet
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
-    dims = collect(1:N-1); dims[end] +=1
+    inds = channel_indices(Val(N))
+    dims = batch_reduction_dims(Val(N))
 
     # Initialize during first pass such that
     # output has zero mean and unit variance
-    if isnothing(AN.s.data) && AN.is_reversed
+    if !AN.initialized && AN.is_reversed
         μ = mean(Y; dims=dims)[inds...]
         σ_sqr = var(Y; dims=dims)[inds...]
-        AN.s.data = sqrt.(σ_sqr)
-        AN.b.data = μ
+        AN.s.data .= sqrt.(σ_sqr)
+        AN.b.data .= μ
+        AN.initialized = true
     end
     X = (Y .- reshape(AN.b.data, inds...)) ./ reshape(AN.s.data, inds...)
 
@@ -98,8 +114,8 @@ end
 
 # 2-3D Backward pass: Input (ΔY, Y), Output (ΔY, Y)
 function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNorm; set_grad::Bool = true) where {T, N}
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
-    dims = collect(1:N-1); dims[end] +=1
+    inds = channel_indices(Val(N))
+    dims = batch_reduction_dims(Val(N))
     nn = size(ΔY)[1:N-2]
 
     X = inverse(Y, AN; logdet=false)
@@ -125,8 +141,8 @@ end
 ## Reverse-layer functions
 # 2-3D Backward pass (inverse): Input (ΔX, X), Output (ΔX, X)
 function backward_inv(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, AN::ActNorm; set_grad::Bool = true) where {T, N}
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
-    dims = collect(1:N-1); dims[end] +=1
+    inds = channel_indices(Val(N))
+    dims = batch_reduction_dims(Val(N))
     nn = size(ΔX)[1:N-2]
 
     Y = forward(X, AN; logdet=false)
@@ -151,9 +167,9 @@ end
 
 ## Jacobian-related functions
 # 2-£D
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractArray{Parameter, 1}, X::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (AN.logdet && ~AN.is_reversed) : logdet = logdet
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
+    inds = channel_indices(Val(N))
     nn = size(ΔX)[1:N-2]
     Δs = Δθ[1].data
     Δb = Δθ[2].data

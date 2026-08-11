@@ -58,10 +58,10 @@ or
 
  See also: [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct CouplingLayerBasic <: NeuralNetLayer
-    RB::Union{ResidualBlock, FluxBlock}
+mutable struct CouplingLayerBasic{R<:Union{ResidualBlock,FluxBlock},A<:ActivationFunction} <: NeuralNetLayer
+    RB::R
     logdet::Bool
-    activation::ActivationFunction
+    activation::A
     is_reversed::Bool
 end
 
@@ -91,7 +91,7 @@ function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLa
     isnothing(logdet) ? logdet = (L.logdet && ~L.is_reversed) : logdet = logdet
 
     # Coupling layer
-    logS_T1, logS_T2 = tensor_split(L.RB.forward(X1))
+    logS_T1, logS_T2 = tensor_split(block_forward(X1, L.RB))
     S = L.activation.forward(logS_T1)
     Y2 = S.*X2 + logS_T2
 
@@ -107,7 +107,7 @@ function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLa
     isnothing(logdet) ? logdet = (L.logdet && L.is_reversed) : logdet = logdet
 
     # Inverse layer
-    logS_T1, logS_T2 = tensor_split(L.RB.forward(Y1))
+    logS_T1, logS_T2 = tensor_split(block_forward(Y1, L.RB))
     S = L.activation.forward(logS_T1)
     X2 = (Y2 - logS_T2) ./ (S .+ eps(T)) # add epsilon to avoid division by 0
 
@@ -179,12 +179,12 @@ end
 ## Jacobian-related functions
 
 # 2D
-function jacobian(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, Δθ::AbstractArray{Parameter, 1},
+function jacobian(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter},
                   X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasic;
                   save=false, logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (L.logdet && ~L.is_reversed) : logdet = logdet
 
-    logS_T1, logS_T2 = tensor_split(L.RB.forward(X1))
+    logS_T1, logS_T2 = tensor_split(block_forward(X1, L.RB))
     ΔlogS_T1, ΔlogS_T2 = tensor_split(jacobian(ΔX1, Δθ, X1, L.RB)[1])
     S = L.activation.forward(logS_T1)
     ΔS = backward(ΔlogS_T1, logS_T1, S, L.activation)

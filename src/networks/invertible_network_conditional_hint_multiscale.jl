@@ -54,17 +54,17 @@ export NetworkMultiScaleConditionalHINT, NetworkMultiScaleConditionalHINT3D
 
  See also: [`ActNorm`](@ref), [`ConditionalLayerHINT!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct NetworkMultiScaleConditionalHINT <: InvertibleNetwork
-    AN_X::AbstractArray{ActNorm, 2}
-    AN_Y::AbstractArray{ActNorm, 2}
-    CL::AbstractArray{ConditionalLayerHINT, 2}
-    XY_dims::Union{Array{Array, 1}, Nothing}
+mutable struct NetworkMultiScaleConditionalHINT{AX<:AbstractMatrix,AY<:AbstractMatrix,C<:AbstractMatrix,D,S<:Squeezer} <: InvertibleNetwork
+    AN_X::AX
+    AN_Y::AY
+    CL::C
+    XY_dims::D
     L::Int64
     K::Int64
     split_scales::Bool
     logdet::Bool
     is_reversed::Bool
-    squeezer::Squeezer
+    squeezer::S
 end
 
 Flux.@layer NetworkMultiScaleConditionalHINT
@@ -73,9 +73,11 @@ Flux.@layer NetworkMultiScaleConditionalHINT
 function NetworkMultiScaleConditionalHINT(n_in::Int64, n_hidden::Int64, L::Int64, K::Int64;
                                           split_scales=false, k1=3, k2=3, p1=1, p2=1, s1=1, s2=1, logdet=true, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())
 
-    AN_X = Array{ActNorm}(undef, L, K)
-    AN_Y = Array{ActNorm}(undef, L, K)
-    CL = Array{ConditionalLayerHINT}(undef, L, K)
+    first_AN_X = ActNorm(n_in * 4; logdet=logdet)
+    first_AN_Y = ActNorm(n_in * 4; logdet=logdet)
+    AN_X = Matrix{typeof(first_AN_X)}(undef, L, K)
+    AN_Y = Matrix{typeof(first_AN_Y)}(undef, L, K)
+    CL = nothing
     if split_scales
         XY_dims = fill!(Array{Array}(undef, L-1), [1,1]) #fill in with dummy values so that |> gpu accepts it
         channel_factor = 2
@@ -87,9 +89,11 @@ function NetworkMultiScaleConditionalHINT(n_in::Int64, n_hidden::Int64, L::Int64
     # Create layers
     for i=1:L
         for j=1:K
-            AN_X[i, j] = ActNorm(n_in*4; logdet=logdet)
-            AN_Y[i, j] = ActNorm(n_in*4; logdet=logdet)
-            CL[i, j] = ConditionalLayerHINT(n_in*4, n_hidden; permute=true, activation=activation,  k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=logdet, ndims=ndims)
+            AN_X[i, j] = i == 1 && j == 1 ? first_AN_X : ActNorm(n_in*4; logdet=logdet)
+            AN_Y[i, j] = i == 1 && j == 1 ? first_AN_Y : ActNorm(n_in*4; logdet=logdet)
+            layer = ConditionalLayerHINT(n_in*4, n_hidden; permute=true, activation=activation, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=logdet, ndims=ndims)
+            isnothing(CL) && (CL = Matrix{typeof(layer)}(undef, L, K))
+            CL[i, j] = layer
         end
         n_in *= channel_factor
     end
@@ -278,7 +282,7 @@ end
 
 ## Jacobian-related utils
 
-function jacobian(ΔX::AbstractArray{T, N}, ΔY::AbstractArray{T, N}, Δθ::Vector{Parameter}, X, Y, CH::NetworkMultiScaleConditionalHINT; logdet=nothing) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, ΔY::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X, Y, CH::NetworkMultiScaleConditionalHINT; logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (CH.logdet && ~CH.is_reversed) : logdet = logdet
 
     if CH.split_scales

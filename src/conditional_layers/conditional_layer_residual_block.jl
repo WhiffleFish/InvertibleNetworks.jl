@@ -46,17 +46,17 @@ or
 
  See also: [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct ConditionalResidualBlock <: NeuralNetLayer
-    W0::Parameter
-    W1::Parameter
-    W2::Parameter
-    W3::Parameter
-    b0::Parameter
-    b1::Parameter
-    b2::Parameter
-    cdims1::DenseConvDims
-    cdims2::DenseConvDims
-    cdims3::DenseConvDims
+struct ConditionalResidualBlock{P0<:Parameter,PW<:Parameter,PB<:Parameter,D1<:DenseConvDims,D2<:DenseConvDims,D3<:DenseConvDims} <: NeuralNetLayer
+    W0::P0
+    W1::PW
+    W2::PW
+    W3::PW
+    b0::PB
+    b1::PB
+    b2::PB
+    cdims1::D1
+    cdims2::D2
+    cdims3::D3
 end
 
 Flux.@layer ConditionalResidualBlock

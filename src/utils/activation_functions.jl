@@ -13,21 +13,21 @@ export ReLUlayer, LeakyReLUlayer, SigmoidLayer, Sigmoid2Layer, GaLUlayer, ExpCla
 ###############################################################################
 # Custom type for activation functions
 
-struct ActivationFunction
-    forward::Function
-    inverse::Union{Nothing, Function}
-    backward::Function
+struct ActivationFunction{F,I,B}
+    forward::F
+    inverse::I
+    backward::B
 end
 
 function backward(Δy::AbstractArray{T, N}, x::AbstractArray{T, N}, y::AbstractArray{T, N}, activation::ActivationFunction) where {T, N}
     backward_activation(activation.backward, activation.inverse, Δy, x, y)
 end
 
-function backward_activation(back::Function, inverse::Nothing, Δy::AbstractArray{T, N}, x::AbstractArray{T, N}, y::AbstractArray{T, N}) where {T, N}
+function backward_activation(back, inverse::Nothing, Δy::AbstractArray{T, N}, x::AbstractArray{T, N}, y::AbstractArray{T, N}) where {T, N}
     back(Δy, x)
 end
 
-function backward_activation(back::Function, inverse::Function, Δy::AbstractArray{T, N}, x::AbstractArray{T, N}, y::AbstractArray{T, N}) where {T, N}
+function backward_activation(back, inverse, Δy::AbstractArray{T, N}, x::AbstractArray{T, N}, y::AbstractArray{T, N}) where {T, N}
     back(Δy, y)
 end
 

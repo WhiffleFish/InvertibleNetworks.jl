@@ -115,3 +115,37 @@ end
 
 @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
 @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###################################################################################################
+# `type="additive"` is the documented default for NetworkLoop, but every test and example
+# above uses type="HINT", so the additive path had no coverage at all.
+
+@testset "additive coupling (default type)" begin
+    # Self-contained inputs: the round-trip accuracy below is set by the Float32 Conv1x1
+    # Householder inverse, so it is sensitive to the exact draw. The gradient tests above
+    # mutate the module-level network/state, so draw fresh values from a pinned seed here
+    # instead of inheriting whatever they left behind.
+    Random.seed!(0xa1d1)
+    d_add = randn(Float32, nt, nxrec*nyrec, 1, batchsize)
+    J_add = 1 .+ rand(Float32, nt*nxrec*nyrec, nx*ny*nz)
+    η_in = 10*randn(Float32, nx, ny, nz, 1, batchsize)
+    s_in = 10*randn(Float32, nx, ny, nz, n_in-1, batchsize)
+
+    L_add = NetworkLoop3D(n_in, n_hidden, maxiter, Ψ)
+    @test eltype(L_add.L) <: CouplingLayerIRIM
+    @test isconcretetype(eltype(L_add.L))
+
+    η_add, s_add = L_add.forward(η_in, s_in, d_add, J_add)
+    η_inv, s_inv = L_add.inverse(η_add, s_add, d_add, J_add)
+    @test isapprox(norm(η_inv - η_in)/norm(η_in), 0f0, atol=1e-5)
+    @test isapprox(norm(s_inv - s_in)/norm(s_in), 0f0, atol=1e-5)
+
+    # The additive path keeps CouplingLayerIRIM's own ReLU default for its residual block,
+    # and `rb_activation` is the knob that reaches it.
+    @test L_add.L[1].RB.activation === ReLUlayer()
+    L_sig = NetworkLoop3D(n_in, n_hidden, maxiter, Ψ; rb_activation=SigmoidLayer())
+    @test L_sig.L[1].RB.activation === SigmoidLayer()
+
+    @test_throws ArgumentError NetworkLoop3D(n_in, n_hidden, maxiter, Ψ; type="nonsense")
+end

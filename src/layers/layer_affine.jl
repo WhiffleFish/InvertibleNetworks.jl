@@ -36,9 +36,9 @@ export AffineLayer
 
  See also: [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct AffineLayer <: NeuralNetLayer
-    s::Parameter
-    b::Parameter
+struct AffineLayer{P<:Parameter} <: NeuralNetLayer
+    s::P
+    b::P
     logdet::Bool
 end
 
@@ -92,7 +92,7 @@ end
 
 ## Jacobian-related utils
 
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter}, X::AbstractArray{T, N}, AL::AffineLayer) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N}, AL::AffineLayer) where {T, N}
     Y = X .* AL.s.data .+ AL.b.data
     ΔY = ΔX .* AL.s.data + X .* Δθ[1].data .+ Δθ[2].data
     if AL.logdet

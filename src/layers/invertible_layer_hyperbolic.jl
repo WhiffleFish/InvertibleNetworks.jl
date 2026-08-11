@@ -53,13 +53,13 @@ Create an invertible hyperbolic coupling layer.
 
  See also: [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct HyperbolicLayer <: NeuralNetLayer
-    W::Parameter
-    b::Parameter
+struct HyperbolicLayer{PW<:Parameter,PB<:Parameter,A} <: NeuralNetLayer
+    W::PW
+    b::PB
     α::Float32
     stride::Int
     pad::Int
-    action
+    action::A
 end
 
 Flux.@layer HyperbolicLayer
@@ -224,7 +224,7 @@ end
 ## Jacobian utilities
 
 # 2D
-function jacobian(ΔX_prev_in::AbstractArray{T, N}, ΔX_curr_in::AbstractArray{T, N}, Δθ::Array{Parameter}, X_prev_in::AbstractArray{T, N}, X_curr_in::AbstractArray{T, N}, HL::HyperbolicLayer) where {T, N}
+function jacobian(ΔX_prev_in::AbstractArray{T, N}, ΔX_curr_in::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X_prev_in::AbstractArray{T, N}, X_curr_in::AbstractArray{T, N}, HL::HyperbolicLayer) where {T, N}
 
     # Change dimensions
     if HL.action == 0

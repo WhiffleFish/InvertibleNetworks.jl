@@ -61,16 +61,23 @@ export NetworkGlow, NetworkGlow3D
 
  See also: [`ActNorm`](@ref), [`CouplingLayerGlow!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkGlow <: InvertibleNetwork
-    AN::AbstractArray{ActNorm, 2}
-    CL::AbstractArray{CouplingLayerGlow, 2}
-    Z_dims::Union{Array{Array, 1}, Nothing}
+struct NetworkGlow{A<:AbstractMatrix,C<:AbstractMatrix,Z,S<:Squeezer,SS,LD} <: InvertibleNetwork
+    AN::A
+    CL::C
+    Z_dims::Z
     L::Int64
     K::Int64
-    squeezer::Squeezer
+    squeezer::S
     split_scales::Bool
     logdet::Bool
 end
+
+
+NetworkGlow(AN::A, CL::C, Z_dims::Z, L::Integer, K::Integer, squeezer::S,
+            split_scales::Bool, logdet::Bool) where
+            {A<:AbstractMatrix,C<:AbstractMatrix,Z,S<:Squeezer} =
+    NetworkGlow{A,C,Z,S,split_scales,logdet}(
+        AN, CL, Z_dims, Int64(L), Int64(K), squeezer, split_scales, logdet)
 
 Flux.@layer NetworkGlow
 
@@ -79,9 +86,6 @@ function NetworkGlow(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, 
     (n_in == 1) && (split_scales = true) # Need extra channels for coupling layer
     (dense && isnothing(nx)) && error("Dense network needs nx as kwarg input") 
 
-    AN = Array{ActNorm}(undef, L, K)    # activation normalization
-    CL = Array{CouplingLayerGlow}(undef, L, K)  # coupling layers w/ 1x1 convolution and residual block
- 
     if split_scales
         Z_dims = fill!(Array{Array}(undef, max(L-1,1)), [1,1]) #fill in with dummy values so that |> gpu accepts it   # save dimensions for inverse/backward pass
         channel_factor = 2^(ndims)
@@ -90,15 +94,21 @@ function NetworkGlow(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, 
         channel_factor = 1
     end
 
+    # Channel count (and dense width) entering each scale, resolved up front so that the
+    # layer arrays below can be built by comprehensions with a concrete element type.
+    scale_channels = Vector{Int64}(undef, L)
+    scale_nx = Vector{typeof(nx)}(undef, L)
     for i=1:L
         n_in *= channel_factor # squeeze if split_scales is turned on
         (dense && split_scales) && (nx = Int64(nx/2))
-        for j=1:K
-            AN[i, j] = ActNorm(n_in; logdet=logdet)
-            CL[i, j] = CouplingLayerGlow(n_in, n_hidden; nx=nx, dense=dense, freeze_conv=freeze_conv, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=logdet, activation=activation, ndims=ndims)
-        end
+        scale_channels[i] = n_in
+        scale_nx[i] = nx
         (i < L && split_scales) && (n_in = Int64(n_in/2); ) # split
     end
+
+    AN = [ActNorm(scale_channels[i]; logdet=logdet) for i=1:L, j=1:K]
+    CL = [CouplingLayerGlow(scale_channels[i], n_hidden; nx=scale_nx[i], dense=dense, freeze_conv=freeze_conv, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=logdet, activation=activation, ndims=ndims)
+          for i=1:L, j=1:K]
 
     return NetworkGlow(AN, CL, Z_dims, L, K, squeezer, split_scales,logdet)
 end
@@ -106,26 +116,36 @@ end
 NetworkGlow3D(args; kw...) = NetworkGlow(args...; kw..., ndims=3)
 
 # Forward pass and compute logdet
-function forward(X::AbstractArray{T, N}, G::NetworkGlow;) where {T, N}
-    G.split_scales && (Z_save = array_of_array(X, max(G.L-1,1)))
+function forward(X::AbstractArray{T,N}, G::NetworkGlow{A,C,Z,S,SS,LD}) where {T,N,A,C,Z,S,SS,LD}
+    return _forward(X, G, Val(SS), Val(LD))
+end
 
-    logdet_ = 0
+function _forward(X::AbstractArray{T,N}, G::NetworkGlow,
+                  ::Val{split_scales}, ::Val{logdet}) where {T,N,split_scales,logdet}
+    split_scales && (Z_save = array_of_array(X, max(G.L-1,1)))
+
+    logdet_ = zero(T)
     for i=1:G.L
-        (G.split_scales) && (X = G.squeezer.forward(X))
-        for j=1:G.K            
-            G.logdet ? (X, logdet1) = G.AN[i, j].forward(X) : X = G.AN[i, j].forward(X)
-            G.logdet ? (X, logdet2) = G.CL[i, j].forward(X) : X = G.CL[i, j].forward(X)
-            G.logdet && (logdet_ += (logdet1 + logdet2))
+        split_scales && (X = G.squeezer.forward(X))
+        for j=1:G.K
+            if logdet
+                X, logdet1 = _forward(X, G.AN[i, j], Val(true))
+                X, logdet2 = _forward(X, G.CL[i, j], Val(true))
+                logdet_ += logdet1 + logdet2
+            else
+                X = _forward(X, G.AN[i, j], Val(false))
+                X = _forward(X, G.CL[i, j], Val(false))
+            end
         end
-        if G.split_scales && (i < G.L || i == 1)    # don't split after last iteration
+        if split_scales && (i < G.L || i == 1)    # don't split after last iteration
             X, Z = tensor_split(X)
             Z_save[i] = Z
             G.Z_dims[i] = collect(size(Z))
         end
     end
-    G.split_scales && (X = cat_states(Z_save, X))
+    split_scales && (X = cat_states(Z_save, X))
 
-    G.logdet ? (return X, logdet_) : (return X)
+    return logdet ? (X, logdet_) : X
 end
 
 # Inverse pass 
@@ -192,7 +212,7 @@ end
 
 
 ## Jacobian-related utils
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Vector{Parameter}, X, G::NetworkGlow) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X, G::NetworkGlow) where {T, N}
 
     if G.split_scales 
         Z_save = array_of_array(ΔX, G.L-1)

@@ -47,10 +47,10 @@ export NetworkConditionalHINT, NetworkConditionalHINT3D
 
  See also: [`ActNorm`](@ref), [`ConditionalLayerHINT!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct NetworkConditionalHINT <: InvertibleNetwork
-    AN_X::AbstractArray{ActNorm, 1}
-    AN_Y::AbstractArray{ActNorm, 1}
-    CL::AbstractArray{ConditionalLayerHINT, 1}
+mutable struct NetworkConditionalHINT{AX<:AbstractVector,AY<:AbstractVector,C<:AbstractVector} <: InvertibleNetwork
+    AN_X::AX
+    AN_Y::AY
+    CL::C
     logdet::Bool
     is_reversed::Bool
 end
@@ -60,16 +60,20 @@ Flux.@layer NetworkConditionalHINT
 # Constructor
 function NetworkConditionalHINT(n_in, n_hidden, depth; k1=3, k2=3, p1=1, p2=1, s1=1, s2=1, logdet=true, ndims=2,activation::ActivationFunction=SigmoidLayer(), )
 
-    AN_X = Array{ActNorm}(undef, depth)
-    AN_Y = Array{ActNorm}(undef, depth)
-    CL = Array{ConditionalLayerHINT}(undef, depth)
+    first_AN_X = ActNorm(n_in; logdet=logdet)
+    first_AN_Y = ActNorm(n_in; logdet=logdet)
+    AN_X = Vector{typeof(first_AN_X)}(undef, depth)
+    AN_Y = Vector{typeof(first_AN_Y)}(undef, depth)
+    CL = nothing
 
     # Create layers
     for j=1:depth
-        AN_X[j] = ActNorm(n_in; logdet=logdet)
-        AN_Y[j] = ActNorm(n_in; logdet=logdet)
-        CL[j] = ConditionalLayerHINT(n_in, n_hidden; activation=activation,permute=true, k1=k1, k2=k2, p1=p1, p2=p2,
+        AN_X[j] = j == 1 ? first_AN_X : ActNorm(n_in; logdet=logdet)
+        AN_Y[j] = j == 1 ? first_AN_Y : ActNorm(n_in; logdet=logdet)
+        layer = ConditionalLayerHINT(n_in, n_hidden; activation=activation,permute=true, k1=k1, k2=k2, p1=p1, p2=p2,
                                      s1=s1, s2=s2, logdet=logdet, ndims=ndims)
+        isnothing(CL) && (CL = Vector{typeof(layer)}(undef, depth))
+        CL[j] = layer
     end
 
     return NetworkConditionalHINT(AN_X, AN_Y, CL, logdet, false)
@@ -82,7 +86,7 @@ function forward(X::AbstractArray{T, N}, Y::AbstractArray{T, N}, CH::NetworkCond
     isnothing(logdet) ? logdet = (CH.logdet && ~CH.is_reversed) : logdet = logdet
 
     depth = length(CH.CL)
-    logdet_ = 0
+    logdet_ = zero(T)
     for j=1:depth
         logdet ? (X_, logdet1) = CH.AN_X[j].forward(X) : X_ = CH.AN_X[j].forward(X)
         logdet ? (Y_, logdet2) = CH.AN_Y[j].forward(Y) : Y_ = CH.AN_Y[j].forward(Y)
@@ -97,7 +101,7 @@ function inverse(Zx::AbstractArray{T, N}, Zy::AbstractArray{T, N}, CH::NetworkCo
     isnothing(logdet) ? logdet = (CH.logdet && CH.is_reversed) : logdet = logdet
 
     depth = length(CH.CL)
-    logdet_ = 0
+    logdet_ = zero(T)
     for j=depth:-1:1
         logdet ? (Zx_, Zy_, logdet1) = CH.CL[j].inverse(Zx, Zy; logdet=true) : (Zx_, Zy_) = CH.CL[j].inverse(Zx, Zy; logdet=false)
         logdet ? (Zy, logdet2) = CH.AN_Y[j].inverse(Zy_; logdet=true) : Zy = CH.AN_Y[j].inverse(Zy_; logdet=false)
@@ -179,11 +183,11 @@ end
 
 ## Jacobian-related utils
 
-function jacobian(ΔX::AbstractArray{T, N}, ΔY::AbstractArray{T, N}, Δθ::Array{Parameter}, X::AbstractArray{T, N}, Y::AbstractArray{T, N}, CH::NetworkConditionalHINT; logdet=nothing) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, ΔY::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N}, Y::AbstractArray{T, N}, CH::NetworkConditionalHINT; logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (CH.logdet && ~CH.is_reversed) : logdet = logdet
 
     depth = length(CH.CL)
-    logdet_ = 0
+    logdet_ = zero(T)
     if logdet
         cls = 4*depth
         ays = 2*depth

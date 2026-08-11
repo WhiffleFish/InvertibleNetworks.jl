@@ -64,16 +64,16 @@ or
 
  See also: [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct ResidualBlock <: NeuralNetLayer
-    W1::Parameter
-    W2::Parameter
-    W3::Parameter
-    b1::Parameter
-    b2::Parameter
+struct ResidualBlock{PW<:Parameter,PB<:Parameter,S,P,A<:ActivationFunction} <: NeuralNetLayer
+    W1::PW
+    W2::PW
+    W3::PW
+    b1::PB
+    b2::PB
     fan::Bool
-    strides
-    pad
-    activation::ActivationFunction
+    strides::S
+    pad::P
+    activation::A
 end
 
 Flux.@layer ResidualBlock
@@ -116,8 +116,14 @@ ResidualBlock3D(args...; kw...) = ResidualBlock(args...; kw..., ndims=3)
 # Functions
 
 # Forward
-function forward(X1::AbstractArray{T, N}, RB::ResidualBlock; save=false) where {T, N}
-    inds =[i!=(N-1) ? 1 : Colon() for i=1:N]
+forward(X1::AbstractArray{T,N}, RB::ResidualBlock; save=false) where {T,N} =
+    _forward(X1, RB, Val(save))
+
+# Fixed-shape internal path for coupling layers that never request saved states.
+block_forward(X, RB::ResidualBlock) = _forward(X, RB, Val(false))
+
+function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{save}) where {T, N, save}
+    inds = channel_indices(Val(N))
 
     Y1 = conv(X1, RB.W1.data; stride=RB.strides[1], pad=RB.pad[1]) .+ reshape(RB.b1.data, inds...)
     X2 = RB.activation.forward(Y1)
@@ -136,8 +142,8 @@ end
 # Backward
 function backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N},
                   RB::ResidualBlock; set_grad::Bool=true) where {T, N}
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
-    dims = collect(1:N-1); dims[end] +=1
+    inds = channel_indices(Val(N))
+    dims = batch_reduction_dims(Val(N))
 
     # Recompute forward states from input X
     Y1, Y2, Y3, X2, X3, X4 = forward(X1, RB; save=true)
@@ -178,9 +184,9 @@ function backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N},
 end
 
 ## Jacobian-related functions
-function jacobian(ΔX1::AbstractArray{T, N}, Δθ::Array{Parameter, 1},
+function jacobian(ΔX1::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter},
                   X1::AbstractArray{T, N}, RB::ResidualBlock) where {T, N}
-    inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
+    inds = channel_indices(Val(N))
     # Cdims
     cdims1 = DenseConvDims(X1, RB.W1.data; stride=RB.strides[1], padding=RB.pad[1])
 

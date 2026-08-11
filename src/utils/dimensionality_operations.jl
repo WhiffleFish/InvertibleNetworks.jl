@@ -9,13 +9,16 @@ export ShuffleLayer, WaveletLayer, HaarLayer
 ###############################################################################
 # Custom type for squeezer functions
 
-struct Squeezer
-    forward::Function
-    inverse::Function
+struct Squeezer{F,I}
+    forward::F
+    inverse::I
 end
 
 function ShuffleLayer(;pattern="checkerboard")
-    return Squeezer(x -> squeeze(x;pattern=pattern), x -> unsqueeze(x;pattern=pattern))
+    pattern == "column" && return Squeezer(x -> squeeze(x, Val(:column)), x -> unsqueeze(x, Val(:column)))
+    pattern == "patch" && return Squeezer(x -> squeeze(x, Val(:patch)), x -> unsqueeze(x, Val(:patch)))
+    pattern == "checkerboard" && return Squeezer(x -> squeeze(x, Val(:checkerboard)), x -> unsqueeze(x, Val(:checkerboard)))
+    throw(ArgumentError("Specified pattern not defined: $pattern"))
 end
 
 function WaveletLayer(;type=WT.db1)
@@ -76,25 +79,32 @@ end
 
  See also: [`unsqueeze`](@ref), [`wavelet_squeeze`](@ref), [`wavelet_unsqueeze`](@ref)
 """
-function squeeze(X::AbstractArray{T, N}; pattern="column") where {T, N}
+function squeeze(X::AbstractArray; pattern="column")
+    pattern == "column" && return squeeze(X, Val(:column))
+    pattern == "patch" && return squeeze(X, Val(:patch))
+    pattern == "checkerboard" && return squeeze(X, Val(:checkerboard))
+    throw(ArgumentError("Specified pattern not defined: $pattern"))
+end
+
+function squeeze(X::AbstractArray{T, N}, ::Val{pattern}) where {T, N, pattern}
     # Dimensions
     nc_in, batchsize = size(X)[N-1:N]
-    if any([mod(nn, 2) == 1 for nn=size(X)[1:N-2]])
+    if any(i -> isodd(size(X, i)), 1:N-2)
        throw("Input dimensions must be multiple of 2")
     end
-    N_out = Tuple(nn÷2 for nn=size(X)[1:N-2])
+    N_out = ntuple(i -> size(X, i) ÷ 2, Val(N - 2))
     nc_out = size(X, N-1) * 2^(N-2)
-    cinds = Tuple(Colon() for i=1:N-2)
+    cinds = ntuple(_ -> Colon(), Val(N - 2))
 
-    if pattern == "column"
+    if pattern === :column
         Y = reshape(X, N_out..., nc_out, batchsize)
-    elseif pattern == "patch"
+    elseif pattern === :patch
         Y = cuzeros(X, N_out..., nc_out, batchsize)
         iX = patch_inds(N_out, N)
         for (i, ix)=enumerate(iX)
             Y[cinds..., (i-1)*nc_in+1:i*nc_in, :] = X[ix..., :, :]
         end
-    elseif pattern == "checkerboard"
+    elseif pattern === :checkerboard
         Y = cuzeros(X, N_out..., nc_out, batchsize)
         iX = checkboard_inds(size(X), N)
         for (i, ix)=enumerate(iX)
@@ -134,26 +144,33 @@ end
 
  See also: [`squeeze`](@ref), [`wavelet_squeeze`](@ref), [`wavelet_unsqueeze`](@ref)
 """
-function unsqueeze(Y::AbstractArray{T,N}; pattern="column") where {T, N}
+function unsqueeze(Y::AbstractArray; pattern="column")
+    pattern == "column" && return unsqueeze(Y, Val(:column))
+    pattern == "patch" && return unsqueeze(Y, Val(:patch))
+    pattern == "checkerboard" && return unsqueeze(Y, Val(:checkerboard))
+    throw(ArgumentError("Specified pattern not defined: $pattern"))
+end
+
+function unsqueeze(Y::AbstractArray{T,N}, ::Val{pattern}) where {T, N, pattern}
 
     # Dimensions
     batchsize = size(Y, N)
     if mod(size(Y, N-1), 2^(N-2)) != 0
         throw("With tensor of dimension N, number of channels must be divisible by 2^(N-2)")
     end
-    N_out = Tuple(nn*2 for nn=size(Y)[1:N-2])
+    N_out = ntuple(i -> size(Y, i) * 2, Val(N - 2))
     nc_out = size(Y, N-1) ÷ 2^(N-2)
-    cinds = Tuple(Colon() for i=1:N-2)
+    cinds = ntuple(_ -> Colon(), Val(N - 2))
 
-    if pattern == "column"
+    if pattern === :column
         X = reshape(Y, N_out..., nc_out, batchsize)
-    elseif pattern == "patch"
+    elseif pattern === :patch
         X = cuzeros(Y, N_out..., nc_out, batchsize)
         iX = patch_inds(size(Y), N)
         for (i, ix)=enumerate(iX)
             X[ix..., :, :] = Y[cinds..., (i-1)*nc_out+1:i*nc_out, :]
         end
-    elseif pattern == "checkerboard"
+    elseif pattern === :checkerboard
         X = cuzeros(Y, N_out..., nc_out, batchsize)
         iX = checkboard_inds(N_out, N)
         for (i, ix)=enumerate(iX)
@@ -403,16 +420,16 @@ end
  See also: [`tensor_cat`](@ref)
 """
 function tensor_split(X::AbstractArray{T, N}; split_index=nothing) where {T, N}
-    d = max(1, N-1)
-    if isnothing(split_index)
-        k = Int(round(size(X, d)/2))
-    else
-        k = split_index
-    end
+    return _tensor_split(X, split_index)
+end
 
-    indsl = [i==d ? (1:k) : Colon() for i=1:N]
-    indsr = [i==d ? (k+1:size(X, d)) : Colon() for i=1:N]
+_tensor_split(X::AbstractArray{T,N}, ::Nothing) where {T,N} =
+    _tensor_split(X, round(Int, size(X, max(1, N - 1)) / 2))
 
+function _tensor_split(X::AbstractArray{T,N}, k::Integer) where {T,N}
+    d = max(1, N - 1)
+    indsl = ntuple(i -> i == d ? (1:k) : Colon(), Val(N))
+    indsr = ntuple(i -> i == d ? (k + 1:size(X, d)) : Colon(), Val(N))
     return X[indsl...], X[indsr...]
 end
 
@@ -454,8 +471,8 @@ function tensor_cat!(out::AbstractArray{T, N}, X::AbstractArray{T, N}, Y::Abstra
         copyto!(out, X)
     else
         k = size(X, d)
-        indsl = [i==d ? (1:k) : Colon() for i=1:N]
-        indsr = [i==d ? (k+1:size(out, d)) : Colon() for i=1:N]
+        indsl = ntuple(i -> i == d ? (1:k) : Colon(), Val(N))
+        indsr = ntuple(i -> i == d ? (k+1:size(out, d)) : Colon(), Val(N))
         out[indsl...] .= X
         out[indsr...] .= Y
     end

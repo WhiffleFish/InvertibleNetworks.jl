@@ -13,6 +13,12 @@ cuones(x, a::Tuple) = cuones(x, a...)
 array_of_array(::Array, args...) = Array{Array}(undef, args...)
 array_of_array(::CuArray, args...) = Array{CuArray}(undef, args...)
 
+# Statically shaped indexing/reduction tuples used throughout convolutional
+# layers. The former comprehensions produced `Vector{Any}` because they mixed
+# integers and `Colon()`, which poisoned inference at every reshape/index.
+@inline channel_indices(::Val{N}) where {N} = ntuple(i -> i == N - 1 ? Colon() : 1, Val(N))
+@inline batch_reduction_dims(::Val{N}) where {N} = ntuple(i -> i == N - 1 ? N : i, Val(N - 1))
+
 # for 1x1 Conv
 gemm_outer!(out::Matrix{T}, tmp::Vector{T}, v::Vector{T}) where T = LinearAlgebra.BLAS.gemm!('N', 'T', T(1), tmp, v, T(1), out)
 gemm_outer!(out::CuMatrix{T}, tmp::CuVector{T}, v::CuVector{T}) where T = CUDA.cuBLAS.gemm!('N', 'T', T(1), tmp, v, T(1), out)

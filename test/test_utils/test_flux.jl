@@ -1,4 +1,4 @@
-using InvertibleNetworks, Flux, Test, LinearAlgebra
+using InvertibleNetworks, Flux, Test, LinearAlgebra, Random
 
 # Define network
 nx = 1
@@ -59,20 +59,29 @@ end
 # interface expects. Check the values Flux actually sees for every Parameter, not just
 # that a gradient of the right shape exists.
 
+Random.seed!(0xf1c5)
+
 G = NetworkGlow(n_in, n_hidden, 2, 2; logdet = false)
 XG = randn(Float32, 4, 4, n_in, batchsize)
-YG = G(XG)                     # first pass initializes the ActNorm parameters
+G(XG)                          # first pass initializes the ActNorm parameters
 XG0 = randn(Float32, 4, 4, n_in, batchsize)
+
+# Both paths end up calling the same hand-written `backward`, so they should agree to the
+# last bit. That only holds if the seed cotangent is identical, so use a loss that is
+# linear in the output: d/dZ sum(Z .* W) is exactly W. Differentiating something like
+# 0.5*norm(Z - Y)^2 instead routes the cotangent through sqrt and a division, which
+# perturbs it in the last bits and makes this comparison tolerance-sensitive.
+W = randn(Float32, size(XG0))
 
 # Gradient via Flux: the structural tangent assembled by the rrule
 InvertibleNetworks.reset!(InvertibleNetworks.GLOBAL_STATE_INVOPS)
-tangent = Flux.gradient(net -> .5f0*norm(net(XG0) - YG)^2, G)[1]
+tangent = Flux.gradient(net -> sum(net(XG0) .* W), G)[1]
 
 # The same gradient via the hand-written backward pass
 InvertibleNetworks.reset!(InvertibleNetworks.GLOBAL_STATE_INVOPS)
 clear_grad!(G)
 ZG = G.forward(XG0)
-G.backward(ZG - YG, ZG)
+G.backward(copy(W), ZG)
 
 # `Flux.trainables` walks the network and the tangent in the same structural order,
 # which is *not* the order of `get_params` (layer matrices are traversed row-major by
@@ -83,8 +92,7 @@ flux_grads = Flux.trainables(tangent)
 
 @test length(flux_grads) == length(get_params(G))
 @test !any(isnothing, expected_grads)
-@test all(isapprox(flux_g, expected_g; rtol = 1f-5)
-          for (flux_g, expected_g) in zip(flux_grads, expected_grads))
+@test all(flux_g == expected_g for (flux_g, expected_g) in zip(flux_grads, expected_grads))
 
 # ... and that Flux's optimiser actually applies them to every parameter
 η = 1f-2

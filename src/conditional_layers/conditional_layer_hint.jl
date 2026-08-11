@@ -51,12 +51,12 @@ export ConditionalLayerHINT, ConditionalLayerHINT3D
 
  See also: [`CouplingLayerBasic`](@ref), [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct ConditionalLayerHINT <: NeuralNetLayer
-    CL_X::CouplingLayerHINT
-    CL_Y::CouplingLayerHINT
-    CL_YX::CouplingLayerBasic
-    C_X::Union{Conv1x1, Nothing}
-    C_Y::Union{Conv1x1, Nothing}
+mutable struct ConditionalLayerHINT{LX<:CouplingLayerHINT,LY<:CouplingLayerHINT,LXY<:CouplingLayerBasic,CX<:Union{Conv1x1,Nothing},CY<:Union{Conv1x1,Nothing}} <: NeuralNetLayer
+    CL_X::LX
+    CL_Y::LY
+    CL_YX::LXY
+    C_X::CX
+    C_Y::CY
     logdet::Bool
     is_reversed::Bool
 end
@@ -223,7 +223,7 @@ end
 
 ## Jacobian-related utils
 
-function jacobian(ΔX::AbstractArray{T, N}, ΔY::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X::AbstractArray{T, N}, Y::AbstractArray{T, N}, CH::ConditionalLayerHINT; logdet=nothing) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, ΔY::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N}, Y::AbstractArray{T, N}, CH::ConditionalLayerHINT; logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (CH.logdet && ~CH.is_reversed) : logdet = logdet
 
     # Selecting parameters

@@ -61,14 +61,14 @@ export NetworkConditionalGlow, NetworkConditionalGlow3D
 
  See also: [`ActNorm`](@ref), [`CouplingLayerGlow!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkConditionalGlow <: InvertibleNetwork
-    AN::AbstractArray{ActNorm, 2}
-    AN_C::ActNorm
-    CL::AbstractArray{ConditionalLayerGlow, 2}
-    Z_dims::Union{Array{Array, 1}, Nothing}
+struct NetworkConditionalGlow{A<:AbstractMatrix,N<:ActNorm,C<:AbstractMatrix,Z,S<:Squeezer} <: InvertibleNetwork
+    AN::A
+    AN_C::N
+    CL::C
+    Z_dims::Z
     L::Int64
     K::Int64
-    squeezer::Squeezer
+    squeezer::S
     split_scales::Bool
 end
 
@@ -76,9 +76,9 @@ Flux.@layer NetworkConditionalGlow
 
 # Constructor
 function NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; freeze_conv=false,  split_scales=false,  rb_activation::ActivationFunction=ReLUlayer(), k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())
-    AN = Array{ActNorm}(undef, L, K)    # activation normalization
+    AN = nothing
     AN_C = ActNorm(n_cond; logdet=false)    # activation normalization for condition
-    CL = Array{ConditionalLayerGlow}(undef, L, K)  # coupling layers w/ 1x1 convolution and residual block
+    CL = nothing
  
     if split_scales
         Z_dims = fill!(Array{Array}(undef, L-1), [1,1]) #fill in with dummy values so that |> gpu accepts it   # save dimensions for inverse/backward pass
@@ -92,8 +92,12 @@ function NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; freeze_conv=false,
         n_in *= channel_factor # squeeze if split_scales is turned on
         n_cond *= channel_factor # squeeze if split_scales is turned on
         for j=1:K
-            AN[i, j] = ActNorm(n_in; logdet=true)
-            CL[i, j] = ConditionalLayerGlow(n_in, n_cond, n_hidden;freeze_conv=freeze_conv,  rb_activation=rb_activation, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=true, activation=activation, ndims=ndims)
+            norm_layer = ActNorm(n_in; logdet=true)
+            isnothing(AN) && (AN = Matrix{typeof(norm_layer)}(undef, L, K))
+            AN[i, j] = norm_layer
+            layer = ConditionalLayerGlow(n_in, n_cond, n_hidden;freeze_conv=freeze_conv, rb_activation=rb_activation, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=true, activation=activation, ndims=ndims)
+            isnothing(CL) && (CL = Matrix{typeof(layer)}(undef, L, K))
+            CL[i, j] = layer
         end
         (i < L && split_scales) && (n_in = Int64(n_in/2)) # split
     end

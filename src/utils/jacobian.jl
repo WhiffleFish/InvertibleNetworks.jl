@@ -9,26 +9,26 @@ export Jacobian
 
 ## Jacobian types
 
-struct JacobianInvertibleNetwork{T} <: joAbstractLinearOperator{T, T}
+struct JacobianInvertibleNetwork{T,F,FT,N<:Invertible,X<:AbstractArray{T},Y} <: joAbstractLinearOperator{T, T}
     name::String
     n::Int64
     m::Int64
-    fop::Function
-    fop_T::Function
-    N::Invertible
-    X::AbstractArray{T}
-    Y::Union{Nothing, AbstractArray{T}}
+    fop::F
+    fop_T::FT
+    N::N
+    X::X
+    Y::Y
 end
 
-struct JacobianInvertibleNetworkAdjoint{T} <: joAbstractLinearOperator{T, T}
+struct JacobianInvertibleNetworkAdjoint{T,F,FT,N<:Invertible,X<:AbstractArray{T},Y} <: joAbstractLinearOperator{T, T}
     name::String
     n::Int64
     m::Int64
-    fop::Function
-    fop_T::Function
-    N::Union{NeuralNetLayer, InvertibleNetwork}
-    X::AbstractArray{T}
-    Y::Union{Nothing, AbstractArray{T}}
+    fop::F
+    fop_T::FT
+    N::N
+    X::X
+    Y::Y
 end
 
 
@@ -50,7 +50,7 @@ function Jacobian(N::Union{InvertibleNetwork, NeuralNetLayer}, X::AbstractArray{
     ((io_mode == "X×θ↦Y") || (io_mode == "X×θ↦Y")) && (n += m)
 
     # Forward evaluation
-    function fop(ΔX::Union{Nothing, AbstractArray{T}}, Δθ::Array{Parameter, 1}) where T
+    function fop(ΔX::Union{Nothing, AbstractArray{T}}, Δθ::AbstractVector{<:Parameter}) where T
         isnothing(ΔX) && (ΔX = cuzeros(X, size(X)...))
         out = N.jacobian(ΔX, Δθ, X)
         ((io_mode == "θ↦Y") || (io_mode == "X×θ↦Y")) && (return out[1])
@@ -73,7 +73,7 @@ function Jacobian(N::Union{InvertibleNetwork, NeuralNetLayer}, X::AbstractArray{
     joJ = joLinearFunctionFwd_T(n, m, fop, fop_adj, Float32, Float32; name=name)
 
     # Output
-    return JacobianInvertibleNetwork{T}(name, n, m, fop, fop_adj, N, X, Y)
+    return JacobianInvertibleNetwork(name, n, m, fop, fop_adj, N, X, Y)
 
 end
 
@@ -81,16 +81,16 @@ end
 ## Algebra
 
 function adjoint(J::JacobianInvertibleNetwork{T}) where T
-    return JacobianInvertibleNetworkAdjoint{T}(string("adjoint(", J.name, ")"), J.m, J.n, J.fop_T, J.fop, J.N, J.X, J.Y)
+    return JacobianInvertibleNetworkAdjoint(string("adjoint(", J.name, ")"), J.m, J.n, J.fop_T, J.fop, J.N, J.X, J.Y)
 end
 
 function adjoint(JT::JacobianInvertibleNetworkAdjoint{T}) where T
-    return JacobianInvertibleNetwork{T}(JT.name[9:end-1], JT.m, JT.n, JT.fop_T, JT.fop, JT.N, JT.X, JT.Y)
+    return JacobianInvertibleNetwork(JT.name[9:end-1], JT.m, JT.n, JT.fop_T, JT.fop, JT.N, JT.X, JT.Y)
 end
 
-*(J::JacobianInvertibleNetwork{T}, Δθ::Array{Parameter,1}) where T = J.fop(nothing, Δθ)
+*(J::JacobianInvertibleNetwork{T}, Δθ::AbstractVector{<:Parameter}) where T = J.fop(nothing, Δθ)
 
-function *(J::JacobianInvertibleNetwork{T}, input::Tuple{AbstractArray{T2}, Array{Parameter,1}}) where {T, T2}
+function *(J::JacobianInvertibleNetwork{T}, input::Tuple{AbstractArray{T2}, <:AbstractVector{<:Parameter}}) where {T, T2}
     return J.fop(jo_convert(T, input[1], false), input[2])
 end
 

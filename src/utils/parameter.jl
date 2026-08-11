@@ -4,22 +4,17 @@
 
 export Parameter, get_params, get_grads, set_params!, par2vec, vec2par
 
-mutable struct Parameter
-    data
-    grad
+mutable struct Parameter{D}
+    data::D
+    grad::Union{Nothing,D}
 end
 
-convert_data!(::Type{T}, ::Parameter, ::AbstractArray{T, N}) where {T, N} = nothing
-convert_data!(::Type{T}, p::Parameter, data::AbstractArray{T2, N}) where {T, T2, N} = (p.data = convert(AbstractArray{T, N}, data))
-convert_data!(::Type{T}, ::Parameter, ::Nothing) where T = nothing
+Parameter(::Nothing) = Parameter{Nothing}(nothing, nothing)
 
-convert_grad!(::Type{T}, ::Parameter, ::AbstractArray{T, N}) where {T, N} = nothing
-convert_grad!(::Type{T}, p::Parameter, data::AbstractArray{T2, N}) where {T, T2, N} = (p.grad = convert(AbstractArray{T, N}, data))
-convert_grad!(::Type{T}, ::Parameter, ::Nothing) where T = nothing
-
+convert_param!(::Type{T}, ::Parameter{D}) where {T,D<:AbstractArray{T}} = nothing
 function convert_param!(::Type{T}, p::Parameter) where T
-    convert_data!(T, p, p.data)
-    convert_grad!(T, p, p.grad)
+    throw(ArgumentError("cannot change a Parameter's concrete storage type in place; " *
+                        "convert the model with Flux.f32, Flux.f64, cpu, or gpu"))
 end
 
 """
@@ -50,7 +45,7 @@ or
 
  Set gradients of each `Parameter` in the network layer to `nothing`.
 """
-function clear_grad!(P::AbstractArray{Parameter, 1})
+function clear_grad!(P::AbstractVector{<:Parameter})
     for j=1:length(P)
         P[j].grad = nothing
     end
@@ -60,7 +55,7 @@ function get_grads(p::Parameter)
     return Parameter(p.grad)
 end
 
-function get_grads(pvec::Array{Parameter, 1})
+function get_grads(pvec::AbstractVector{<:Parameter})
     g = Array{Parameter, 1}(undef, length(pvec))
     for i = 1:length(pvec)
         g[i] = get_grads(pvec[i])
@@ -75,13 +70,13 @@ function set_params!(pold::Parameter, pnew::Parameter)
     pold.grad = pnew.grad
 end
 
-function set_params!(pold::Array{Parameter, 1}, pnew::Array{Parameter, 1})
+function set_params!(pold::AbstractVector{<:Parameter}, pnew::AbstractVector{<:Parameter})
     for i = 1:length(pold)
         set_params!(pold[i], pnew[i])
     end
 end
 
-function set_params!(pold::Array{Parameter, 1}, pnew::Array{Any, 1})
+function set_params!(pold::AbstractVector{<:Parameter}, pnew::AbstractVector)
     for i = 1:length(pold)
         set_params!(pold[i], pnew[i])
     end
@@ -152,7 +147,7 @@ function vec2par(x::AbstractArray{T, 1}, s::NTuple{N, Int64}) where {T, N}
     return Parameter(reshape(x, s))
 end
 
-function par2vec(x::Array{Parameter, 1})
+function par2vec(x::AbstractVector{<:Parameter})
     v = cat([vec(x[i].data) for i=1:length(x)]..., dims=1)
     s = cat([size(x[i].data) for i=1:length(x)]..., dims=1)
     return v, s

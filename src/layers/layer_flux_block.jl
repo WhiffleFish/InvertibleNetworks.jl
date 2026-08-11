@@ -29,12 +29,14 @@ export FluxBlock
 
  See also:  [`Chain`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct FluxBlock <: NeuralNetLayer
-    model::Chain
+mutable struct FluxBlock{M<:Chain} <: NeuralNetLayer
+    model::M
     params::Array{Parameter, 1}
 end
 
 Flux.@layer FluxBlock trainable=(params,)
+
+block_forward(X, FB::FluxBlock) = forward(X, FB)
 
 #######################################################################################################################
 # Constructor
@@ -97,7 +99,7 @@ end
 
 ## Jacobian utilities
 
-function jacobian(::AbstractArray{T, N}, ::Array{Parameter, 1}, ::AbstractArray{T, N}, ::FluxBlock) where {T, N}
+function jacobian(::AbstractArray{T, N}, ::AbstractVector{<:Parameter}, ::AbstractArray{T, N}, ::FluxBlock) where {T, N}
     throw(ArgumentError("Jacobian for Flux block not yet implemented"))
 end
 
@@ -125,7 +127,7 @@ function get_params(FB::FluxBlock)
     return FB.params
 end
 
-function set_params!(FB::FluxBlock, θ::Array{Parameter, 1})
+function set_params!(FB::FluxBlock, θ::AbstractVector{<:Parameter})
     model_params = Flux.trainables(FB.model)
     nparams = length(model_params)
     for j=1:nparams

@@ -23,10 +23,16 @@ _INet_modes = [:forward, :inverse, :backward, :backward_inv, :inverse_Y, :forwar
 _RNet_modes = Dict(:forward=>:inverse, :inverse=>:forward, :backward=>:backward_inv,
                    :inverse_Y=>:forward_Y, :forward_Y=>:inverse_Y)
 
-# Actual call to propagation function
-function _predefined_mode(obj, sym::Symbol, args...; kwargs...)
-    convert_params!(input_type(args[1]), obj)
-    eval(sym)(args..., obj; kwargs...)
+# Actual call to propagation function. Dispatch through `Val` so the selected
+# operation remains visible to inference; runtime `eval(sym)` made every
+# `layer.forward(...)`/`network.backward(...)` call return `Any`.
+function _predefined_mode(obj, mode::Val, args...; kwargs...)
+    _apply_mode(mode, obj, args...; kwargs...)
+end
+
+for mode in _INet_modes
+    @eval _apply_mode(::Val{$(Meta.quot(mode))}, obj, args...; kwargs...) =
+        $mode(args..., obj; kwargs...)
 end
 
 # Base getproperty
@@ -37,7 +43,8 @@ _get_property(R::Reversed, ::Val{:I}) = getfield(R, :I)
 _get_property(R::Reversed, ::Val{s}) where s = _get_property(R.I, Val{s}())
 
 for m ∈ _INet_modes
-    @eval _get_property(I::Union{InvertibleNetwork,NeuralNetLayer}, ::Val{$(Meta.quot(m))}) = (args...; kwargs...) -> _predefined_mode(I, $(Meta.quot(m)), args...; kwargs...)
+    @eval _get_property(I::Union{InvertibleNetwork,NeuralNetLayer}, ::Val{$(Meta.quot(m))}) =
+        (args...; kwargs...) -> _predefined_mode(I, Val($(Meta.quot(m))), args...; kwargs...)
 end
 
 for (m, k) ∈ _RNet_modes
@@ -46,10 +53,28 @@ end
 
 # Type conversions
 function convert_params!(::Type{T}, obj::Invertible) where T
-    for p ∈ get_params(obj)
-        convert_param!(T, p)
-    end
+    _convert_fields!(T, obj)
 end
+
+@generated function _convert_fields!(::Type{T}, obj::I) where {T,I<:Invertible}
+    conversions = [:(convert_params!(T, getfield(obj, $i))) for i in 1:fieldcount(I)]
+    return Expr(:block, conversions..., :(nothing))
+end
+
+convert_params!(::Type{T}, p::Parameter) where {T} = convert_param!(T, p)
+function convert_params!(::Type{T}, values::AbstractArray) where {T}
+    for value in values
+        convert_params!(T, value)
+    end
+    return nothing
+end
+function convert_params!(::Type{T}, values::Tuple) where {T}
+    for value in values
+        convert_params!(T, value)
+    end
+    return nothing
+end
+convert_params!(::Type, ::Any) = nothing
 
 input_type(x::AbstractArray) = eltype(x)
 input_type(x::Tuple) = eltype(x[1])
@@ -73,7 +98,7 @@ function get_params(I::Invertible)
     params = Vector{Parameter}(undef, 0)
     for (f, tp) ∈ zip(fieldnames(typeof(I)), typeof(I).types)
         p = getfield(I, f)
-        if tp == Parameter
+        if tp <: Parameter
             append!(params, [p])
         else
             append!(params, get_params(p))
@@ -84,6 +109,7 @@ end
 
 get_params(x) = Array{Parameter}(undef, 0)
 get_params(A::Array{T}) where T<:Union{Invertible, Nothing} = vcat([get_params(A[i]) for i in 1:length(A)]...)
+get_params(values::Tuple) = vcat((get_params(value) for value in values)...)
 get_params(A::Matrix{T}) where T<:Union{Invertible, Nothing} = vcat([get_params(A[i, j]) for i=1:size(A, 1) for j in 1:size(A, 2)]...)
 get_params(RN::Reversed) = get_params(RN.I)
 
@@ -91,15 +117,35 @@ get_params(RN::Reversed) = get_params(RN.I)
 """
     P = reset!(NL::Invertible)
 
- Resets the data of all the parameters in NL
+ Resets stateful layers and clears cached parameter gradients without changing
+ the concrete parameter storage.
 """
 function reset!(I::Invertible)
-    for p ∈ get_params(I)
-        p.data = nothing
-    end
+    _reset_fields!(I)
+    return I
 end
 
-reset!(AI::Array{<:Invertible}) = for I ∈ AI reset!(I) end
+@generated function _reset_fields!(I::T) where {T<:Invertible}
+    resets = [:(reset_value!(getfield(I, $i))) for i in 1:fieldcount(T)]
+    return Expr(:block, resets..., :(nothing))
+end
+
+reset_value!(p::Parameter) = (p.grad = nothing; nothing)
+reset_value!(I::Invertible) = (reset!(I); nothing)
+function reset_value!(values::Union{AbstractArray,Tuple})
+    for value in values
+        reset_value!(value)
+    end
+    return nothing
+end
+reset_value!(::Any) = nothing
+
+function reset!(AI::AbstractArray{<:Invertible})
+    for I in AI
+        reset!(I)
+    end
+    return AI
+end
 
 # Clear grad functionality for reversed layers/networks
 """
@@ -123,7 +169,7 @@ get_grads(RL::Reversed)= get_grads(RL.I)
 get_grads(::Nothing) = []
 
 # Set parameters
-function set_params!(N::Invertible, θnew::Array{Parameter, 1})
+function set_params!(N::Invertible, θnew::AbstractVector{<:Parameter})
     set_params!(get_params(N), θnew)
 end
 

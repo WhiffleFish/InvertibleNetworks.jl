@@ -39,11 +39,11 @@ export Conv1x1
 
  See also: [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct Conv1x1 <: NeuralNetLayer
-    k::Integer
-    v1::Parameter
-    v2::Parameter
-    v3::Parameter
+struct Conv1x1{P<:Parameter} <: NeuralNetLayer
+    k::Int64
+    v1::P
+    v2::P
+    v3::P
     logdet::Bool
     freeze::Bool
 end
@@ -247,7 +247,7 @@ end
 
 ## Jacobian-related functions
 
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X::AbstractArray{T, N}, C::Conv1x1) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N}, C::Conv1x1) where {T, N}
     Y = cuzeros(X, size(X)...)
     ΔY = cuzeros(ΔX, size(ΔX)...)
     n_in = size(X, N-1)
@@ -284,7 +284,7 @@ function adjointJacobian(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::Co
     return inverse((ΔY, Y), C; set_grad=false)
 end
 
-function jacobianInverse(ΔY::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, Y::AbstractArray{T, N}, C::Conv1x1) where {T, N}
+function jacobianInverse(ΔY::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, Y::AbstractArray{T, N}, C::Conv1x1) where {T, N}
     return inverse(C).jacobian(ΔY, Δθ[end:-1:1], Y)
 end
 

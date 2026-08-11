@@ -60,12 +60,16 @@ or
 
  See also: [`Conv1x1`](@ref), [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct CouplingLayerGlow <: NeuralNetLayer
-    C::Conv1x1
-    RB::Union{ResidualBlock, FluxBlock}
+struct CouplingLayerGlow{C<:Conv1x1,R<:Union{ResidualBlock,FluxBlock},A<:ActivationFunction,LD} <: NeuralNetLayer
+    C::C
+    RB::R
     logdet::Bool
-    activation::ActivationFunction
+    activation::A
 end
+
+CouplingLayerGlow(C::CT, RB::RT, logdet::Bool, activation::AT) where
+    {CT<:Conv1x1,RT<:Union{ResidualBlock,FluxBlock},AT<:ActivationFunction} =
+    CouplingLayerGlow{CT,RT,AT,logdet}(C, RB, logdet, activation)
 
 Flux.@layer CouplingLayerGlow
 
@@ -101,19 +105,23 @@ end
 CouplingLayerGlow3D(args...;kw...) = CouplingLayerGlow(args...; kw..., ndims=3)
 
 # Forward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, L::CouplingLayerGlow) where {T,N}
-    X_ = L.C.forward(X)
+function forward(X::AbstractArray{T, N}, L::CouplingLayerGlow{C,R,A,LD}) where {T,N,C,R,A,LD}
+    return _forward(X, L, Val(LD))
+end
+
+function _forward(X::AbstractArray{T, N}, L::CouplingLayerGlow, ::Val{logdet}) where {T,N,logdet}
+    X_ = forward(X, L.C; logdet=false)
     X1, X2 = tensor_split(X_)
 
     Y2 = copy(X2)
-    logS_T = L.RB.forward(X2)
+    logS_T = block_forward(X2, L.RB)
     logSm, Tm = tensor_split(logS_T)
     Sm = L.activation.forward(logSm)
     Y1 = Sm.*X1 + Tm
 
     Y = tensor_cat(Y1, Y2)
 
-    L.logdet == true ? (return Y, glow_logdet_forward(Sm)) : (return Y)
+    return logdet ? (Y, glow_logdet_forward(Sm)) : Y
 end
 
 # Inverse pass: Input Y, Output X
@@ -121,7 +129,7 @@ function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow; save=false) where
     Y1, Y2 = tensor_split(Y)
 
     X2 = copy(Y2)
-    logS_T = L.RB.forward(X2)
+    logS_T = block_forward(X2, L.RB)
     logSm, Tm = tensor_split(logS_T)
     Sm = L.activation.forward(logSm)
     X1 = (Y1 - Tm) ./ (Sm .+ eps(T)) # add epsilon to avoid division by 0
@@ -172,7 +180,7 @@ end
 
 ## Jacobian-related functions
 
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X, L::CouplingLayerGlow) where {T,N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X, L::CouplingLayerGlow) where {T,N}
 
     # Get dimensions
     k = Int(L.C.k/2)

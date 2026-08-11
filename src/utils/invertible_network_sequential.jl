@@ -5,11 +5,11 @@
 export ComposedInvertibleNetwork, Composition
 import Base.length, Base.∘
 
-struct ComposedInvertibleNetwork <: InvertibleNetwork
-    layers::Array{T, 1} where {T <: Invertible}
-    logdet_array::Array{Bool, 1}
+struct ComposedInvertibleNetwork{L<:Tuple,D<:Tuple,P<:Tuple} <: InvertibleNetwork
+    layers::L
+    logdet_array::D
     logdet::Bool
-    npars::Array{Int64, 1}
+    npars::P
 end
 
 Flux.@layer ComposedInvertibleNetwork
@@ -19,31 +19,13 @@ Flux.@layer ComposedInvertibleNetwork
 
 function Composition(layer...)
 
-    # Initializing output
     depth = length(layer)
-    net_array = Array{Invertible, 1}(undef, depth)
-    logdet_array = Array{Bool, 1}(undef, depth)
-    logdet = false
-    npars = Array{Int64, 1}(undef, depth)
+    layers = reverse(layer)
+    logdet_array = ntuple(i -> hasproperty(layers[i], :logdet) && layers[i].logdet, depth)
+    logdet = any(logdet_array)
+    npars = ntuple(i -> length(get_params(layers[i])), depth)
 
-    # Loop over layers
-    for i = 1:depth
-
-        # Selecting layer (last-to-first)
-        layer_i = layer[depth-i+1]
-
-        # Setting layer/logdets/# of parameters
-        net_array[i] = layer_i
-        if hasproperty(layer_i, :logdet) && layer_i.logdet
-            logdet_array[i] = true
-            logdet = true
-        else
-            logdet_array[i] = false
-        end
-        npars[i] = length(get_params(layer_i))
-    end
-
-    return ComposedInvertibleNetwork(net_array, logdet_array, logdet, npars)
+    return ComposedInvertibleNetwork(layers, logdet_array, logdet, npars)
 
 end
 
@@ -51,19 +33,19 @@ end
 ## Composition utilities
 
 function ∘(net1::ComposedInvertibleNetwork, net2::ComposedInvertibleNetwork)
-    return Composition(cat(net1.layers[end:-1:1], net2.layers[end:-1:1]; dims=1)...)
+    return Composition(net1.layers[end:-1:1]..., net2.layers[end:-1:1]...)
 end
 
 function ∘(net1::Union{NeuralNetLayer, InvertibleNetwork}, net2::Union{NeuralNetLayer, InvertibleNetwork})
-    return Composition(cat(net1, net2; dims=1)...)
+    return Composition(net1, net2)
 end
 
 function ∘(net1::Union{NeuralNetLayer, InvertibleNetwork}, net2::ComposedInvertibleNetwork)
-    return Composition(cat(net1, net2.layers[end:-1:1]; dims=1)...)
+    return Composition(net1, net2.layers[end:-1:1]...)
 end
 
 function ∘(net1::ComposedInvertibleNetwork, net2::Union{NeuralNetLayer, InvertibleNetwork})
-    return Composition(cat(net1.layers[end:-1:1], net2; dims=1)...)
+    return Composition(net1.layers[end:-1:1]..., net2)
 end
 
 function length(N::ComposedInvertibleNetwork)
@@ -121,7 +103,7 @@ end
 
 ## Jacobian-related utilities
 
-function jacobian(ΔX::AbstractArray{T, N1}, Δθ::Array{Parameter, 1}, X::AbstractArray{T, N1}, N::ComposedInvertibleNetwork) where {T, N1}
+function jacobian(ΔX::AbstractArray{T, N1}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N1}, N::ComposedInvertibleNetwork) where {T, N1}
     N.logdet && (l = 0; GNΔθ = Array{Parameter, 1}(undef, 0))
     idx_pars = 0
     for i = 1:length(N)

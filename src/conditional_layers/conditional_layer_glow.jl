@@ -58,11 +58,11 @@ or
 
  See also: [`Conv1x1`](@ref), [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct ConditionalLayerGlow <: NeuralNetLayer
-    C::Conv1x1
-    RB::ResidualBlock
+struct ConditionalLayerGlow{C<:Conv1x1,R<:ResidualBlock,A<:ActivationFunction} <: NeuralNetLayer
+    C::C
+    RB::R
     logdet::Bool
-    activation::ActivationFunction
+    activation::A
 end
 
 Flux.@layer ConditionalLayerGlow
@@ -93,13 +93,13 @@ ConditionalLayerGlow3D(args...;kw...) = ConditionalLayerGlow(args...; kw..., ndi
 # Forward pass: Input X, Output Y
 function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlow) where {T,N}
 
-    X_ = L.C.forward(X)
+    X_ = forward(X, L.C; logdet=false)
     X1, X2 = tensor_split(X_)
 
     Y2 = copy(X2)
 
     # Cat conditioning variable C into network input
-    logS_T = L.RB.forward(tensor_cat(X2,C))
+    logS_T = block_forward(tensor_cat(X2,C), L.RB)
     logS, log_T = tensor_split(logS_T)
 
     Sm = L.activation.forward(logS)
@@ -117,7 +117,7 @@ function inverse(Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalL
     Y1, Y2 = tensor_split(Y)
 
     X2 = copy(Y2)
-    logS_T = L.RB.forward(tensor_cat(X2,C))
+    logS_T = block_forward(tensor_cat(X2,C), L.RB)
     logS, log_T = tensor_split(logS_T)
 
     Sm = L.activation.forward(logS)
