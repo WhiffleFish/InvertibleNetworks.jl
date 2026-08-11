@@ -134,6 +134,9 @@ include("networks/invertible_network_conditional_hint_multiscale.jl")
 
 include("networks/summarized_net.jl")
 
+# Chain-style composition (needs the layer/network types above to be defined)
+include("networks/invertible_chain.jl")
+
 # Jacobians
 include("utils/jacobian.jl")
 

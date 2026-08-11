@@ -56,7 +56,11 @@ end
 ## Forward/inverse/backward
 
 function forward(X::AbstractArray{T, N1}, N::ComposedInvertibleNetwork) where {T, N1}
-    N.logdet && (logdet = 0)
+    # `zero(T)`, not `0`: a literal Int accumulator widens the return type to
+    # Union{T,Int}. Note this loop is still not inferrable overall, because `N.layers[i]`
+    # indexes a heterogeneous tuple with a runtime index -- see `InvertibleChain` for the
+    # type-stable, recursively-unrolled equivalent.
+    N.logdet && (logdet = zero(T))
     for i = 1:length(N)
         if N.logdet_array[i]        
             X, logdet_ = N.layers[i].forward(X)

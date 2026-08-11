@@ -2,7 +2,7 @@
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: January 2020
 
-export log_likelihood, ∇log_likelihood, Hlog_likelihood, mse, ∇mse, Hmse
+export log_likelihood, ∇log_likelihood, Hlog_likelihood, gaussian_lognorm, mse, ∇mse, Hmse
 
 ###################################################################################################
 # Mean squared error
@@ -44,14 +44,38 @@ end
 # Log-likelihood
 
 """
-    f = log_likelihood(X; μ=T(0), σ=T(1))
+    f = log_likelihood(X; μ=T(0), σ=T(1), normalized=false)
 
 Log-likelihood of X for a Gaussian distribution with given mean μ and variance
-σ. All elements of X are assumed to be iid.
+σ. All elements of X are assumed to be iid. The value is averaged over the batch
+(the trailing dimension of X).
 
-See also: [`∇log_likelihood`](@ref)
+By default the Gaussian normalizing constant is dropped, so the result is a log-density
+up to an additive constant -- enough for optimization, since the constant does not depend
+on the model. Pass `normalized=true` to include `-d/2*log(2πσ²)`, where `d` is the number
+of elements per sample, and get a calibrated log-density.
+
+See also: [`∇log_likelihood`](@ref), [`gaussian_lognorm`](@ref)
 """
-log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1)) where {T, N} = T(1/size(X, N))*sum(-T(.5)*((X .- μ)/σ).^2)
+log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1), normalized::Bool=false) where {T, N} =
+    T(1/size(X, N))*sum(-T(.5)*((X .- μ)/σ).^2) + (normalized ? gaussian_lognorm(X, σ) : zero(T))
+
+
+"""
+    c = gaussian_lognorm(X, σ)
+
+Per-sample Gaussian normalizing constant `-d/2*log(2πσ²)`, where `d = length(X) ÷ size(X, N)`
+is the number of elements in one sample of the batched array `X`.
+
+Since [`log_likelihood`](@ref) is averaged over the batch and this constant is the same for
+every sample, it is added once rather than averaged.
+
+See also: [`log_likelihood`](@ref)
+"""
+function gaussian_lognorm(X::AbstractArray{T, N}, σ) where {T, N}
+    d = length(X) ÷ size(X, N)
+    return T(-d/2 * log(2*π*σ^2))
+end
 
 
 """

@@ -37,7 +37,8 @@ layers = ["test_layers/test_residual_block.jl",
           "test_layers/test_actnorm.jl",
           "test_layers/test_layer_affine.jl"]
 
-networks = ["test_networks/test_unrolled_loop.jl",
+networks = ["test_networks/test_invertible_chain.jl",
+            "test_networks/test_unrolled_loop.jl",
             "test_networks/test_generator.jl",
             "test_networks/test_glow.jl",
             "test_networks/test_dense_glow.jl",
