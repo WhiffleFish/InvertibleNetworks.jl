@@ -280,6 +280,59 @@ end
     @test isapprox(batched, sum(per_sample)/length(per_sample); rtol=1f-5)
 end
 
+@testset "per-sample log_likelihood" begin
+    flow = make_flow()
+    scores = log_likelihood_per_sample(X, flow)
+
+    @test length(scores) == size(X, ndims(X))
+    @test eltype(scores) == Float32
+
+    # Unaggregated form of the scalar version
+    @test isapprox(sum(scores)/length(scores), log_likelihood(X, flow); rtol=1f-5)
+
+    # Each entry is exactly the scalar call on that one sample
+    @test all(scores[i] == log_likelihood(X[:, :, :, i:i], flow) for i in eachindex(scores))
+
+    # The whole point: they differ from one another
+    @test length(unique(scores)) == length(scores)
+
+    @test isapprox(log_likelihood_per_sample(X, flow; normalized=true),
+                   scores .+ gaussian_lognorm(X[:, :, :, 1:1], 1f0); rtol=1f-5)
+
+    # Available for the other networks too
+    Random.seed!(5)
+    G = NetworkGlow(n_in, n_hidden, 1, 2; logdet=true)
+    G(X)
+    @test isapprox(sum(log_likelihood_per_sample(X, G))/size(X, 4), log_likelihood(X, G); rtol=1f-5)
+
+    # A fresh network must be initialized from the whole batch, not from sample 1
+    Random.seed!(3)
+    fresh = InvertibleChain(ActNorm(n_in; logdet=true),
+                            CouplingLayerGlow(n_in, n_hidden; logdet=true),
+                            ActNorm(n_in; logdet=true))
+    fresh_scores = log_likelihood_per_sample(X, fresh)
+    @test fresh[1].s.data ≈ make_flow()[1].s.data
+    @test isapprox(fresh_scores, scores; rtol=1f-5)
+end
+
+@testset "per-sample log_likelihood is differentiable" begin
+    # `sum` of the per-sample values is `batchsize` times the aggregate, so the gradients
+    # must agree up to that factor. An absolute tolerance is needed because some entries
+    # (the last ActNorm's bias) are zero to within Float32 noise.
+    B = size(X, ndims(X))
+    _, per_sample_grads = Flux.withgradient(m -> sum(log_likelihood_per_sample(X, m)), make_flow())
+    _, scaled_grads = Flux.withgradient(m -> B*log_likelihood(X, m), make_flow())
+    @test all(!isnothing, Flux.trainables(per_sample_grads[1]))
+    @test all(isapprox(a, b; rtol=1f-3, atol=1f-4)
+              for (a, b) in zip(Flux.trainables(per_sample_grads[1]),
+                                Flux.trainables(scaled_grads[1])))
+
+    # The reason to want this: per-example weights
+    weights = rand(Float32, B)
+    _, weighted = Flux.withgradient(m -> -sum(weights .* log_likelihood_per_sample(X, m)), make_flow())
+    @test all(!isnothing, Flux.trainables(weighted[1]))
+end
+
 @testset "unsupported interfaces error clearly" begin
     flow = make_flow()
     Z, _ = flow.forward(X)

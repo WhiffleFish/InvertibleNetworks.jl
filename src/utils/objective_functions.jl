@@ -2,7 +2,8 @@
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: January 2020
 
-export log_likelihood, ∇log_likelihood, Hlog_likelihood, gaussian_lognorm, mse, ∇mse, Hmse
+export log_likelihood, log_likelihood_per_sample, ∇log_likelihood, Hlog_likelihood,
+       gaussian_lognorm, mse, ∇mse, Hmse
 
 ###################################################################################################
 # Mean squared error
@@ -59,6 +60,23 @@ See also: [`∇log_likelihood`](@ref), [`gaussian_lognorm`](@ref)
 """
 log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1), normalized::Bool=false) where {T, N} =
     T(1/size(X, N))*sum(-T(.5)*((X .- μ)/σ).^2) + (normalized ? gaussian_lognorm(X, σ) : zero(T))
+
+
+"""
+    f = log_likelihood_per_sample(X; μ=T(0), σ=T(1), normalized=false)
+
+Gaussian log-likelihood of each sample in the batched array `X`, returned as a vector of
+length `size(X, N)`. This is the unaggregated form of [`log_likelihood`](@ref):
+`sum(log_likelihood_per_sample(X))/size(X, N) == log_likelihood(X)`.
+
+See also: [`log_likelihood`](@ref)
+"""
+function log_likelihood_per_sample(X::AbstractArray{T, N}; μ=T(0), σ=T(1),
+                                  normalized::Bool=false) where {T, N}
+    dims = ntuple(i -> i, Val(N-1))     # everything except the batch dimension
+    f = dropdims(sum(-T(.5)*((X .- μ)/σ).^2; dims=dims); dims=dims)
+    return normalized ? f .+ gaussian_lognorm(X, σ) : f
+end
 
 
 """
