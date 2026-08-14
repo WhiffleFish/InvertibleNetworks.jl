@@ -290,8 +290,10 @@ end
     # Unaggregated form of the scalar version
     @test isapprox(sum(scores)/length(scores), log_likelihood(X, flow); rtol=1f-5)
 
-    # Each entry is exactly the scalar call on that one sample
-    @test all(scores[i] == log_likelihood(X[:, :, :, i:i], flow) for i in eachindex(scores))
+    # Each entry is the scalar call on that one sample. The fused path reduces over the
+    # batch last instead of never, so the agreement is up to floating point, not exact.
+    @test isapprox(scores, [log_likelihood(X[:, :, :, i:i], flow) for i in eachindex(scores)];
+                   rtol=1f-4)
 
     # The whole point: they differ from one another
     @test length(unique(scores)) == length(scores)
@@ -331,6 +333,123 @@ end
     weights = rand(Float32, B)
     _, weighted = Flux.withgradient(m -> -sum(weights .* log_likelihood_per_sample(X, m)), make_flow())
     @test all(!isnothing, Flux.trainables(weighted[1]))
+end
+
+@testset "per-sample log_likelihood is a single pass" begin
+    flow = make_flow()
+
+    # The per-sample vector is what the scalar log-determinant is the mean of, from the
+    # same pass -- not one pass per sample
+    Z, lgdet = flow.forward(X)
+    Z_ps, lgdet_ps = flow.forward(X; logdet=:sample)
+    @test Z_ps ≈ Z
+    @test length(lgdet_ps) == batchsize
+    @test isapprox(sum(lgdet_ps)/batchsize, lgdet; rtol=1f-5)
+
+    @test supports_per_sample_logdet(flow)
+    @test isapprox(log_likelihood_per_sample(X, flow),
+                   log_likelihood_per_sample(Z) .+ lgdet_ps; rtol=1f-4)
+
+    # A network whose layers only report a batch average falls back to the loop, which is
+    # slower but still correct
+    Random.seed!(5)
+    G = NetworkGlow(n_in, n_hidden, 1, 2; logdet=true)
+    G(X)
+    @test !supports_per_sample_logdet(G)
+    @test isapprox(sum(log_likelihood_per_sample(X, G))/batchsize, log_likelihood(X, G);
+                   rtol=1f-5)
+
+    # A chain that accumulates nothing has no per-sample log-determinant to report
+    plain = InvertibleChain(ActNorm(n_in), CouplingLayerGlow(n_in, n_hidden))
+    plain(X)
+    @test_throws ArgumentError plain.forward(X; logdet=:sample)
+    @test_throws ArgumentError flow.forward(X; logdet=:mean)
+end
+
+@testset "per-example weights in the loss" begin
+    # The batch-averaged pullback rescales one log-determinant gradient for the whole batch,
+    # which cannot express per-example weights; check the fused path against the loop.
+    weights = rand(Float32, batchsize)
+    _, fused = Flux.withgradient(m -> -sum(weights .* log_likelihood_per_sample(X, m)),
+                                 make_flow())
+    _, loop = Flux.withgradient(make_flow()) do m
+        -sum(weights[i]*log_likelihood(X[:, :, :, i:i], m) for i in 1:batchsize)
+    end
+    @test all(!isnothing, Flux.trainables(fused[1]))
+    @test all(isapprox(a, b; rtol=1f-2, atol=1f-4)
+              for (a, b) in zip(Flux.trainables(fused[1]), Flux.trainables(loop[1])))
+
+    # A loss that uses only the log-determinant leaves no cotangent on Z at all
+    _, logdet_only = Flux.withgradient(m -> sum(weights .* forward_per_sample(X, m)[2]),
+                                       make_flow())
+    @test all(!isnothing, Flux.trainables(logdet_only[1]))
+end
+
+@testset "inverse reports its log-determinant" begin
+    flow = make_flow()
+    Z, lgdet = flow.forward(X)
+
+    X_, lgdet_inv = flow.inverse(Z; logdet=true)
+    @test isapprox(X_, X; rtol=1f-4)
+    @test isapprox(lgdet_inv, -lgdet; rtol=1f-5)
+
+    X_ps, lgdet_ps = flow.inverse(Z; logdet=:sample)
+    @test isapprox(X_ps, X; rtol=1f-4)
+    @test isapprox(sum(lgdet_ps)/batchsize, lgdet_inv; rtol=1f-5)
+
+    # Generating a sample and scoring it is one pass, not two
+    Zr = randn(Float32, size(X)...)
+    Xg, logp = inverse_and_log_likelihood(Zr, flow)
+    @test isapprox(logp, log_likelihood(Xg, flow); rtol=1f-4)
+
+    Xg_ps, logp_ps = inverse_and_log_likelihood_per_sample(Zr, flow)
+    @test Xg_ps ≈ Xg
+    @test isapprox(logp_ps, log_likelihood_per_sample(Xg_ps, flow); rtol=1f-4)
+    @test isapprox(sum(logp_ps)/batchsize, logp; rtol=1f-5)
+
+    Xg_n, logp_n = inverse_and_log_likelihood(Zr, flow; normalized=true)
+    @test isapprox(logp_n, log_likelihood(Xg_n, flow; normalized=true); rtol=1f-4)
+
+    plain = InvertibleChain(ActNorm(n_in), CouplingLayerGlow(n_in, n_hidden))
+    plain(X)
+    @test_throws ArgumentError plain.inverse(X; logdet=true)
+end
+
+@testset "lazily-initialized layers" begin
+    # A flow used generatively before it has ever seen data has no map yet: the ActNorm
+    # parameters are defined by the statistics of the first forward batch, so an `inverse`
+    # that silently used s=1, b=0 would change the map on the first loss evaluation.
+    Random.seed!(3)
+    fresh = InvertibleChain(ActNorm(n_in; logdet=true),
+                            CouplingLayerGlow(n_in, n_hidden; logdet=true),
+                            ActNorm(n_in; logdet=true))
+    @test needs_init(fresh)
+    @test_throws ArgumentError fresh.inverse(X)
+
+    init!(fresh, X)
+    @test !needs_init(fresh)
+    Z, _ = fresh.forward(X)
+    @test isapprox(fresh.inverse(Z), X; rtol=1f-5)
+
+    # Same statistics as a flow initialized by a forward pass, and idempotent
+    s = copy(fresh[1].s.data)
+    init!(fresh, 100f0*X .+ 5f0)
+    @test fresh[1].s.data == s
+    @test fresh[1].s.data ≈ make_flow()[1].s.data
+
+    # A reversed layer normalizes on the other pass, so the same rule applies mirrored:
+    # `rev.forward` is the normalizing direction, `rev.inverse` is undefined before it
+    rev = reverse(ActNorm(n_in; logdet=true))
+    @test needs_init(rev)
+    @test_throws ArgumentError rev.inverse(X)
+    rev.forward(X)
+    @test !needs_init(rev)
+end
+
+@testset "coupling layers need a channel split" begin
+    @test_throws ArgumentError CouplingLayerGlow(1, n_hidden)
+    @test_throws ArgumentError ConditionalLayerGlow(1, 2, n_hidden)
+    @test CouplingLayerGlow(2, n_hidden) isa CouplingLayerGlow
 end
 
 @testset "unsupported interfaces error clearly" begin

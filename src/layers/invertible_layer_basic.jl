@@ -89,37 +89,42 @@ CouplingLayerBasic3D(args...;kw...) = CouplingLayerBasic(args...; kw..., ndims=3
 # 2D/3D Forward pass: Input X, Output Y
 function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasic; save::Bool=false, logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (L.logdet && ~L.is_reversed) : logdet = logdet
+    mode = logdet_mode(logdet)
 
     # Coupling layer
     logS_T1, logS_T2 = tensor_split(block_forward(X1, L.RB))
     S = L.activation.forward(logS_T1)
     Y2 = S.*X2 + logS_T2
 
-    if logdet
-        save ? (return X1, Y2, coupling_logdet_forward(S), logS_T1, S) : (return X1, Y2, coupling_logdet_forward(S))
-    else
+    if mode isa Val{false}
         save ? (return X1, Y2, logS_T1, S) : (return X1, Y2)
+    else
+        lgdet = coupling_logdet(S, mode)
+        save ? (return X1, Y2, lgdet, logS_T1, S) : (return X1, Y2, lgdet)
     end
 end
 
 # 2D/3D Inverse pass: Input Y, Output X
 function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasic; save::Bool=false, logdet=nothing) where {T, N}
     isnothing(logdet) ? logdet = (L.logdet && L.is_reversed) : logdet = logdet
+    mode = logdet_mode(logdet)
 
     # Inverse layer
     logS_T1, logS_T2 = tensor_split(block_forward(Y1, L.RB))
     S = L.activation.forward(logS_T1)
     X2 = (Y2 - logS_T2) ./ (S .+ eps(T)) # add epsilon to avoid division by 0
 
-    if logdet
-        save == true ? (return Y1, X2, -coupling_logdet_forward(S), logS_T1, S) : (return Y1, X2, -coupling_logdet_forward(S))
-    else
+    if mode isa Val{false}
         save == true ? (return Y1, X2, logS_T1, S) : (return Y1, X2)
+    else
+        lgdet = -coupling_logdet(S, mode)
+        save == true ? (return Y1, X2, lgdet, logS_T1, S) : (return Y1, X2, lgdet)
     end
 end
 
 # 2D/3D Backward pass: Input (ΔY, Y), Output (ΔX, X)
-function backward(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasic; set_grad::Bool=true) where {T, N}
+function backward(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasic; set_grad::Bool=true, logdet_weight=nothing) where {T, N}
+    check_logdet_weight(logdet_weight, set_grad)
 
     # Recompute forward state
     X1, X2, logS_T1, S = inverse(Y1, Y2, L; save=true, logdet=false)
@@ -128,7 +133,7 @@ function backward(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::Abst
     ΔT = copy(ΔY2)
     ΔS = ΔY2 .* X2
     if L.logdet
-        set_grad && (ΔS -= coupling_logdet_backward(S))
+        set_grad && (ΔS += logdet_scale_grad(S, logdet_weight))
     end
     ΔX2 = ΔY2 .* S
     if set_grad
@@ -149,7 +154,8 @@ function backward(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::Abst
 end
 
 # 2D/3D Reverse backward pass: Input (ΔX, X), Output (ΔY, Y)
-function backward_inv(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasic; set_grad::Bool=true) where {T, N}
+function backward_inv(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasic; set_grad::Bool=true, logdet_weight=nothing) where {T, N}
+    check_logdet_weight(logdet_weight, set_grad)
 
     # Recompute inverse state
     Y1, Y2, logS_T1, S = forward(X1, X2, L; save=true, logdet=false)
@@ -158,7 +164,7 @@ function backward_inv(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, X1::
     ΔT = -ΔX2 ./ S
     ΔS = X2 .* ΔT
     if L.logdet == true
-        set_grad ? (ΔS += coupling_logdet_backward(S)) : (∇logdet = -coupling_logdet_backward(S))
+        set_grad ? (ΔS -= logdet_scale_grad(S, logdet_weight)) : (∇logdet = -coupling_logdet_backward(S))
     end
     if set_grad
         ΔY1 = L.RB.backward(tensor_cat(backward(ΔS, logS_T1, S, L.activation), ΔT), Y1) + ΔX1
@@ -211,6 +217,10 @@ end
 ## Logdet utils
 coupling_logdet_forward(S) = sum(log.(abs.(S))) / size(S)[end]
 coupling_logdet_backward(S) = 1f0./ S / size(S)[end]
+
+# Batch-averaged scalar or the per-sample vector it averages, selected by the `logdet` mode.
+coupling_logdet(S, ::Val{true}) = coupling_logdet_forward(S)
+coupling_logdet(S, ::Val{:sample}) = logdet_per_sample(S)
 
 # Set is_reversed flag
 function tag_as_reversed!(L::CouplingLayerBasic, tag::Bool)

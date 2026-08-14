@@ -1,7 +1,9 @@
 # Chain-style composition of invertible layers, with automatic logdet accumulation
 # and a ChainRules pullback so Flux/Zygote can differentiate it directly.
 
-export InvertibleChain, flow_forward
+export InvertibleChain, flow_forward, flow_forward_per_sample, forward_per_sample
+export supports_per_sample_logdet
+export inverse_and_log_likelihood, inverse_and_log_likelihood_per_sample
 
 """
     C = InvertibleChain(layers...)
@@ -24,9 +26,13 @@ export InvertibleChain, flow_forward
  - Forward mode: `Z, logdet = C.forward(X)`, or just `Z = C.forward(X)` when no layer
    contributes a log-determinant
 
- - Inverse mode: `X = C.inverse(Z)`
+ - Inverse mode: `X = C.inverse(Z)`, or `X, logdet = C.inverse(Z; logdet=true)`
 
  - Backward mode: `ΔX, X = C.backward(ΔZ, Z)`
+
+ - Per sample: pass `logdet=:sample` to either direction for the vector of per-sample
+   log-determinants instead of their batch average; see [`log_likelihood_per_sample`](@ref)
+   and [`forward_per_sample`](@ref)
 
  Unlike the other networks in this package, `C(X)` returns the same thing whether or not it
  is called inside a gradient, so a flow objective can be written once and used for both
@@ -108,17 +114,60 @@ end
 @inline _accumulate_logdet(logdet, ::Nothing) = logdet
 @inline _accumulate_logdet(logdet, Δlogdet) = logdet + Δlogdet
 
-# Recursion over the layer tuple: unrolled by the compiler, so no runtime tuple indexing.
-_apply_forward(X, logdet, ::Tuple{}) = (X, logdet)
-function _apply_forward(X, logdet, layers::Tuple)
-    Y, Δlogdet = _step_out(forward(X, first(layers)))
-    return _apply_forward(Y, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers))
+# A chain can be scored per sample when every layer that contributes a log-determinant can
+# report it per sample; the rest have to be evaluated one sample at a time.
+supports_per_sample_logdet(C::InvertibleChain) =
+    all(l -> !contributes_logdet(l) || supports_per_sample_logdet(l), C.layers)
+
+function _check_per_sample_logdet(C::InvertibleChain)
+    supports_per_sample_logdet(C) && return nothing
+    bad = first(l for l in C.layers if contributes_logdet(l) && !supports_per_sample_logdet(l))
+    throw(ArgumentError(
+        "$(nameof(typeof(bad))) reports its log-determinant averaged over the batch and " *
+        "cannot report it per sample, so this chain has no per-sample log-determinant"))
 end
 
-function forward(X::AbstractArray{T,N}, C::InvertibleChain{L,LD}) where {T,N,L,LD}
-    Z, logdet = _apply_forward(X, zero(T), C.layers)
-    return LD ? (Z, logdet) : Z
+# Recursion over the layer tuple: unrolled by the compiler, so no runtime tuple indexing.
+@inline _forward_step(X, layer, ::Val{true}) = forward(X, layer)
+@inline _forward_step(X, layer, mode::Val{:sample}) =
+    contributes_logdet(layer) ? forward(X, layer; logdet=:sample) : forward(X, layer)
+
+_apply_forward(X, logdet, ::Tuple{}, ::Val) = (X, logdet)
+function _apply_forward(X, logdet, layers::Tuple, mode::Val)
+    Y, Δlogdet = _step_out(_forward_step(X, first(layers), mode))
+    return _apply_forward(Y, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers), mode)
 end
+
+"""
+    Z, logdet = forward(X, C::InvertibleChain)
+    Z, logdet = forward(X, C::InvertibleChain; logdet=:sample)
+
+ Apply the layers of `C` in order, accumulating the log-determinant of every layer built
+ with `logdet=true`.
+
+ By default `logdet` is the batch-averaged scalar the layers have always returned. With
+ `logdet=:sample` it is instead the vector of length `size(X, N)` that scalar is the mean
+ of, computed in the same single pass: the per-sample information is already in each
+ layer's scaling, and only the reduction over the batch dimension destroys it.
+"""
+forward(X::AbstractArray{T,N}, C::InvertibleChain{L,LD}; logdet=nothing) where {T,N,L,LD} =
+    _chain_forward(X, C, logdet_mode(logdet, Val(LD)))
+
+_chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T,N} =
+    _apply_forward(X, zero(T), C.layers, Val(true))[1]
+
+_chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N} =
+    _apply_forward(X, zero(T), C.layers, Val(true))
+
+function _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, mode::Val{:sample}) where {T,N}
+    _check_accumulates_logdet(C)
+    _check_per_sample_logdet(C)
+    return _apply_forward(X, constant_per_sample(X, zero(T)), C.layers, mode)
+end
+
+_check_accumulates_logdet(C::InvertibleChain) = C.logdet || throw(ArgumentError(
+    "this network does not accumulate a log-determinant, so there is none to report; " *
+    "build its layers with logdet=true"))
 
 _apply_inverse(Z, ::Tuple{}) = Z
 function _apply_inverse(Z, layers::Tuple)
@@ -126,21 +175,87 @@ function _apply_inverse(Z, layers::Tuple)
     return _apply_inverse(X, Base.tail(layers))
 end
 
-inverse(Z::AbstractArray{T,N}, C::InvertibleChain) where {T,N} =
+# Log-determinant of the inverse map, for the layers that can report it. Every layer that
+# contributes to the forward log-determinant recomputes its scaling on the inverse pass
+# anyway, so this is free; the generic fallback throws rather than silently dropping a term.
+_inverse_with_logdet(Z::AbstractArray, L::Union{ActNorm,Conv1x1,CouplingLayerGlow,AffineLayer,BoundedBijector}, mode) =
+    inverse(Z, L; logdet=_mode_kwarg(mode))
+_inverse_with_logdet(Z::AbstractArray, C::InvertibleChain, mode) =
+    inverse(Z, C; logdet=_mode_kwarg(mode))
+_inverse_with_logdet(::AbstractArray, L, ::Any) = throw(ArgumentError(
+    "$(nameof(typeof(L))) contributes a log-determinant but cannot report it on the " *
+    "inverse pass; get it from a forward pass instead of asking `inverse` for it"))
+
+@inline _mode_kwarg(::Val{true}) = true
+@inline _mode_kwarg(::Val{:sample}) = :sample
+
+# A layer contributes the same term to both directions, with opposite signs, so the
+# inverse total is the negative of the forward total for the same chain.
+@inline function _inverse_step(Z, layer, mode::Val)
+    contributes_logdet(layer) || return (_step_out(inverse(Z, layer))[1], nothing)
+    return _inverse_with_logdet(Z, layer, mode)
+end
+
+_apply_inverse(X, logdet, ::Tuple{}, ::Val) = (X, logdet)
+function _apply_inverse(Z, logdet, layers::Tuple, mode::Val)
+    X, Δlogdet = _inverse_step(Z, first(layers), mode)
+    return _apply_inverse(X, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers), mode)
+end
+
+"""
+    X = inverse(Z, C::InvertibleChain)
+    X, logdet = inverse(Z, C::InvertibleChain; logdet=true)
+    X, logdet = inverse(Z, C::InvertibleChain; logdet=:sample)
+
+ Apply the layers of `C` in reverse, each in its inverse direction.
+
+ With `logdet=true` the log-determinant of the inverse map is returned alongside `X`, so a
+ sample and its density come out of a single pass. It is the negative of what a forward
+ pass over the same chain reports, hence the minus sign in the change of variables:
+
+     log p_X(X) = log p_Z(Z) - logdet
+
+ `logdet=:sample` returns the per-sample vector instead of the batch-averaged scalar.
+
+ See also: [`inverse_and_log_likelihood`](@ref), [`log_likelihood`](@ref)
+"""
+inverse(Z::AbstractArray{T,N}, C::InvertibleChain; logdet=false) where {T,N} =
+    _inverse(Z, C, logdet_mode(logdet))
+
+_inverse(Z::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T,N} =
     _apply_inverse(Z, reverse(C.layers))
 
-_apply_backward(ΔY, Y, ::Tuple{}) = (ΔY, Y)
-function _apply_backward(ΔY, Y, layers::Tuple)
-    ΔX, X = backward(ΔY, Y, first(layers))
-    return _apply_backward(ΔX, X, Base.tail(layers))
+function _inverse(Z::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N}
+    _check_inverse_logdet(C)
+    return _apply_inverse(Z, zero(T), reverse(C.layers), Val(true))
+end
+
+function _inverse(Z::AbstractArray{T,N}, C::InvertibleChain, mode::Val{:sample}) where {T,N}
+    _check_inverse_logdet(C)
+    _check_per_sample_logdet(C)
+    return _apply_inverse(Z, constant_per_sample(Z, zero(T)), reverse(C.layers), mode)
+end
+
+_check_inverse_logdet(C::InvertibleChain) = _check_accumulates_logdet(C)
+
+# Per-sample log-determinant weights, when given, are handed to each layer that contributes
+# one: the hand-written backward passes cannot recover them from a batch-averaged pass.
+@inline _backward_step(ΔY, Y, layer, ::Nothing) = backward(ΔY, Y, layer)
+@inline _backward_step(ΔY, Y, layer, w::AbstractVector) =
+    contributes_logdet(layer) ? backward(ΔY, Y, layer; logdet_weight=w) : backward(ΔY, Y, layer)
+
+_apply_backward(ΔY, Y, ::Tuple{}, w) = (ΔY, Y)
+function _apply_backward(ΔY, Y, layers::Tuple, w)
+    ΔX, X = _backward_step(ΔY, Y, first(layers), w)
+    return _apply_backward(ΔX, X, Base.tail(layers), w)
 end
 
 function backward(ΔZ::AbstractArray{T,N}, Z::AbstractArray{T,N}, C::InvertibleChain;
-                  set_grad::Bool=true) where {T,N}
+                  set_grad::Bool=true, logdet_weight=nothing) where {T,N}
     set_grad || throw(ArgumentError("InvertibleChain only implements backward with " *
                                     "set_grad=true; use the layers directly for the " *
                                     "Jacobian interface"))
-    return _apply_backward(ΔZ, Z, reverse(C.layers))
+    return _apply_backward(ΔZ, Z, reverse(C.layers), logdet_weight)
 end
 
 function jacobian(::AbstractArray{T,N}, ::AbstractVector{<:Parameter}, ::AbstractArray{T,N},
@@ -182,15 +297,90 @@ _logdet_weight(::AbstractZero) = 0
 _logdet_weight(::Nothing) = 0
 _logdet_weight(w::Number) = w
 
+# A loss may use only the log-determinant, leaving no cotangent on `Z` at all.
+_input_cotangent(ΔZ, Z::AbstractArray) = convert(typeof(Z), ΔZ)
+_input_cotangent(::AbstractZero, Z::AbstractArray) = zero(Z)
+_input_cotangent(::Nothing, Z::AbstractArray) = zero(Z)
+
 function ChainRulesCore.rrule(::typeof(flow_forward), net::Invertible, X, θ)
     out = forward(X, net)
     pullback(Δout) = _flow_pullback(net, out, unthunk(Δout))
     return out, pullback
 end
 
+
+"""
+    Z, logdet = flow_forward_per_sample(net, X, θ)
+
+ Differentiable entry point for a network's per-sample log-determinant: the same single
+ forward pass as [`flow_forward`](@ref), with `logdet` a vector of length `size(X, N)`
+ instead of its batch average.
+
+ Its pullback takes the per-sample cotangent seriously. The batch-averaged path can rescale
+ a log-determinant gradient after the fact, because every sample carries the same weight;
+ per-example weights cannot be recovered that way, so the weights are pushed into the
+ layers' backward passes instead.
+"""
+flow_forward_per_sample(net::Invertible, X::AbstractArray, ::Any) =
+    forward(X, net; logdet=:sample)
+
+
+"""
+    Z, logdet = forward_per_sample(X, net)
+
+ Forward pass reporting a per-sample log-determinant: a vector of length `size(X, N)` rather
+ than its batch average. Differentiable with Zygote/Flux, including with per-example weights
+ on `logdet`.
+
+ `net.forward(X; logdet=:sample)` computes the same thing but, like every hand-written
+ `forward` in this package, cannot be traced by AD; this is the entry point to use inside a
+ loss.
+
+# Example
+
+```julia
+function loss(m)
+    Z, logdet = forward_per_sample(X, m)
+    return -sum(weights .* (log_likelihood_per_sample(Z) .+ logdet))
+end
+```
+
+ which is [`log_likelihood_per_sample`](@ref)`(X, m)` spelled out.
+
+ See also: [`log_likelihood_per_sample`](@ref), [`flow_forward`](@ref)
+"""
+forward_per_sample(X::AbstractArray, net::Invertible) =
+    flow_forward_per_sample(net, X, parameter_data(net))
+
+function ChainRulesCore.rrule(::typeof(flow_forward_per_sample), net::Invertible, X, θ)
+    out = forward(X, net; logdet=:sample)
+    function flow_forward_per_sample_pullback(Δout)
+        ΔZ, Δlogdet = _output_cotangent(unthunk(Δout))
+        Z = out[1]
+        ΔX, Δθ = _flow_backward_weighted(net, _input_cotangent(ΔZ, Z), Z,
+                                         _per_sample_weight(Δlogdet, out[2]))
+        return NoTangent(), NoTangent(), ΔX, Δθ
+    end
+    return out, flow_forward_per_sample_pullback
+end
+
+_per_sample_weight(w::AbstractVector, ::AbstractVector) = w
+_per_sample_weight(::AbstractZero, logdet::AbstractVector) = zero(logdet)
+_per_sample_weight(::Nothing, logdet::AbstractVector) = zero(logdet)
+
+# One pass: with explicit per-sample weights the layers compute the gradient the loss
+# actually asked for, so there is nothing to correct afterwards.
+function _flow_backward_weighted(net::Invertible, ΔZ, Z, w)
+    params = get_params(net)
+    # `Conv1x1` accumulates into `p.grad` where every other layer overwrites.
+    clear_grad!(net)
+    ΔX, _ = backward(copy(ΔZ), copy(Z), net; logdet_weight=w)
+    return ΔX, getfield.(params, :grad)
+end
+
 # Network without a log-determinant: the cotangent is just ΔZ.
 function _flow_pullback(net::Invertible, Z::AbstractArray, Δout)
-    ΔX, Δθ = _flow_backward(net, convert(typeof(Z), Δout), Z, -1)
+    ΔX, Δθ = _flow_backward(net, _input_cotangent(Δout, Z), Z, -1)
     return NoTangent(), NoTangent(), ΔX, Δθ
 end
 
@@ -201,7 +391,7 @@ function _flow_pullback(net::Invertible, out::Tuple, Δout)
         "$(length(out))-tuple. Conditional networks are not supported."))
     Z = out[1]
     ΔZ, Δlogdet = _output_cotangent(Δout)
-    ΔX, Δθ = _flow_backward(net, convert(typeof(Z), ΔZ), Z, _logdet_weight(Δlogdet))
+    ΔX, Δθ = _flow_backward(net, _input_cotangent(ΔZ, Z), Z, _logdet_weight(Δlogdet))
     return NoTangent(), NoTangent(), ΔX, Δθ
 end
 
@@ -289,6 +479,64 @@ _flow_log_likelihood(::AbstractArray, μ, σ, normalized) = throw(ArgumentError(
 
 
 """
+    X, f = inverse_and_log_likelihood(Z, net; μ=0f0, σ=1f0, normalized=false)
+
+ Push the latent sample `Z` through `net.inverse` and return both the sample `X` and its
+ log-likelihood under the flow, from a single pass:
+
+     log p_X(X) = log p_Z(Z) - logdet
+
+ where `logdet` is the log-determinant of the inverse map. This is what a sampling loop
+ wants -- generating an `X` and scoring it are the same computation, and doing them
+ separately costs a second pass through the network.
+
+ The value follows the conventions of [`log_likelihood`](@ref): averaged over the batch,
+ and up to an additive constant unless `normalized=true`.
+
+# Example
+
+```julia
+Z = randn(Float32, nx, ny, n, batchsize)
+X, logp = inverse_and_log_likelihood(Z, flow)
+```
+
+ See also: [`log_likelihood`](@ref), [`InvertibleChain`](@ref)
+"""
+function inverse_and_log_likelihood(Z::AbstractArray{T,N}, net::Invertible; μ=T(0), σ=T(1),
+                                    normalized::Bool=false) where {T,N}
+    X, logdet = _inverse_with_logdet_checked(Z, net, true)
+    return X, log_likelihood(Z; μ=μ, σ=σ, normalized=normalized) - logdet
+end
+
+
+"""
+    X, f = inverse_and_log_likelihood_per_sample(Z, net; μ=0f0, σ=1f0, normalized=false)
+
+ Per-sample form of [`inverse_and_log_likelihood`](@ref): `f` is a vector of length
+ `size(Z, N)` holding the log-likelihood of each generated sample.
+
+ This is what a rollout wants -- each generated sample scored individually, from the pass
+ that generated it.
+
+ See also: [`inverse_and_log_likelihood`](@ref), [`log_likelihood_per_sample`](@ref)
+"""
+function inverse_and_log_likelihood_per_sample(Z::AbstractArray{T,N}, net::Invertible;
+                                               μ=T(0), σ=T(1),
+                                               normalized::Bool=false) where {T,N}
+    X, logdet = _inverse_with_logdet_checked(Z, net, :sample)
+    return X, log_likelihood_per_sample(Z; μ=μ, σ=σ, normalized=normalized) .- logdet
+end
+
+function _inverse_with_logdet_checked(Z::AbstractArray, net::Invertible, mode)
+    out = inverse(Z, net; logdet=mode)
+    out isa Tuple || throw(ArgumentError(
+        "inverse_and_log_likelihood needs the change-of-variables term, but this network " *
+        "does not accumulate a log-determinant; build its layers with logdet=true"))
+    return out
+end
+
+
+"""
     f = log_likelihood_per_sample(X, net; μ=0f0, σ=1f0, normalized=false)
 
  Log-likelihood of each sample of `X` under the normalizing flow `net`, returned as a vector
@@ -297,13 +545,13 @@ _flow_log_likelihood(::AbstractArray, μ, σ, normalized) = throw(ArgumentError(
      sum(log_likelihood_per_sample(X, net))/size(X, N) == log_likelihood(X, net)
 
  Useful for per-example scoring -- outlier/anomaly detection, importance weights, or
- inspecting which samples the flow explains badly.
+ inspecting which samples the flow explains badly -- and differentiable, so per-example
+ weights can appear in a loss.
 
- The layers report a batch-aggregated log-determinant (`coupling_logdet_forward` divides by
- the batch), so there is no per-sample log-determinant to read off a single batched pass.
- These layers do not mix samples, though, so `net` is evaluated one sample at a time, which
- is exact. The total work is the same as one batched pass -- only the per-call overhead is
- multiplied, measured at roughly 1.3x for a batch of 32.
+ This is a single batched pass whenever every log-determinant in `net` can be reported per
+ sample (see [`supports_per_sample_logdet`](@ref)). For a network whose layers only report
+ a batch average, it falls back to evaluating `net` one sample at a time: exact, since the
+ layers do not mix samples, but N times the work.
 
  A full-batch forward pass is run first so that lazily-initialized layers (`ActNorm`) take
  their statistics from the whole batch rather than from a single sample.
@@ -322,9 +570,21 @@ function log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible; μ=T(
     # Initialize lazily-initialized layers from the whole batch. Hidden from AD: it is a
     # setup side effect, and tracing the hand-written forward directly (rather than through
     # the `flow_forward` rule) would hit its in-place updates.
-    ChainRulesCore.ignore_derivatives() do
-        forward(X, net)
-    end
+    init!(net, X)
+    return _log_likelihood_per_sample(X, net, Val(supports_per_sample_logdet(net)); μ=μ, σ=σ,
+                                      normalized=normalized)
+end
+
+function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Val{true};
+                                    μ=T(0), σ=T(1), normalized::Bool=false) where {T,N}
+    Z, logdet = flow_forward_per_sample(net, X, parameter_data(net))
+    return log_likelihood_per_sample(Z; μ=μ, σ=σ, normalized=normalized) .+ logdet
+end
+
+# One pass per sample, for networks whose layers only report a batch-averaged
+# log-determinant.
+function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Val{false};
+                                    μ=T(0), σ=T(1), normalized::Bool=false) where {T,N}
     colons = ntuple(_ -> Colon(), Val(N-1))
     return [log_likelihood(X[colons..., i:i], net; μ=μ, σ=σ, normalized=normalized)
             for i in axes(X, N)]

@@ -1,5 +1,5 @@
 export NeuralNetLayer, InvertibleNetwork, ReverseLayer, ReverseNetwork
-export get_grads
+export get_grads, init!, needs_init, supports_per_sample_logdet
 
 abstract type Invertible end
 
@@ -112,6 +112,74 @@ get_params(A::Array{T}) where T<:Union{Invertible, Nothing} = vcat([get_params(A
 get_params(values::Tuple) = vcat((get_params(value) for value in values)...)
 get_params(A::Matrix{T}) where T<:Union{Invertible, Nothing} = vcat([get_params(A[i, j]) for i=1:size(A, 1) for j in 1:size(A, 2)]...)
 get_params(RN::Reversed) = get_params(RN.I)
+
+# Data-dependent initialization
+"""
+    net = init!(net, X)
+
+ Run the data-dependent initialization of every lazily-initialized layer in `net`
+ (currently [`ActNorm`](@ref)) from the batch `X`, and return `net`.
+
+ Layers like `ActNorm` derive their parameters from the statistics of the first batch they
+ see in the data-to-latent direction, so a network that is used generatively first has no
+ well-defined map yet. Calling `init!` once, on a representative batch, pins the map down
+ before any `inverse` call.
+
+ This is a forward pass run for its side effect and hidden from AD. It is a no-op once every
+ layer is initialized, so it is cheap to call defensively; to initialize again from new
+ data, [`reset!`](@ref) the network first. For conditional networks, pass the conditioning
+ input as well: `init!(net, X, Y)`.
+
+# Example
+
+```julia
+flow = InvertibleChain(ActNorm(n; logdet=true), CouplingLayerGlow(n, n_hidden; logdet=true))
+init!(flow, X)          # otherwise `flow.inverse(Z)` has nothing to go on
+X̂ = flow.inverse(randn(Float32, size(X)...))
+```
+
+ See also: [`ActNorm`](@ref), [`reset!`](@ref)
+"""
+function init!(net::Invertible, args::Vararg{AbstractArray})
+    needs_init(net) || return net
+    ChainRulesCore.ignore_derivatives() do
+        forward(args..., net)
+    end
+    return net
+end
+
+"""
+    b = supports_per_sample_logdet(layer)
+
+ Whether `layer` can report its log-determinant per sample rather than averaged over the
+ batch. `false` by default: a layer opts in by accepting `logdet=:sample` in its `forward`
+ and `inverse`.
+
+ See also: [`log_likelihood_per_sample`](@ref), [`forward_per_sample`](@ref)
+"""
+supports_per_sample_logdet(::Any) = false
+
+"""
+    b = needs_init(net)
+
+ Whether any lazily-initialized layer inside `net` has yet to see data.
+
+ See also: [`init!`](@ref)
+"""
+needs_init(I::Invertible) = _any_needs_init(I)
+
+@generated function _any_needs_init(I::T) where {T<:Invertible}
+    fieldcount(T) == 0 && return false
+    checks = [:(needs_init_value(getfield(I, $i))) for i in 1:fieldcount(T)]
+    return foldr((a, b) -> Expr(:||, a, b), checks)
+end
+
+# Only recurse into fields that can hold layers; parameter data must not be walked
+# elementwise, since this runs on every per-sample scoring call.
+needs_init_value(I::Invertible) = needs_init(I)
+needs_init_value(values::Tuple) = any(needs_init_value, values)
+needs_init_value(A::AbstractArray{<:Union{Invertible,Nothing}}) = any(needs_init_value, A)
+needs_init_value(::Any) = false
 
 # reset! parameters
 """

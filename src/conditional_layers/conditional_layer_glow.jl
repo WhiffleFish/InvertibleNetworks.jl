@@ -74,7 +74,13 @@ function ConditionalLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false, activ
 end
 
 # Constructor from input dimensions
-function ConditionalLayerGlow(n_in::Int64, n_cond::Int64, n_hidden::Int64;freeze_conv=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, activation::ActivationFunction=SigmoidLayer(), rb_activation::ActivationFunction=RELUlayer(), ndims=2)
+function ConditionalLayerGlow(n_in::Int64, n_cond::Int64, n_hidden::Int64;freeze_conv=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, activation::ActivationFunction=SigmoidLayer(), rb_activation::ActivationFunction=ReLUlayer(), ndims=2)
+
+    # A coupling layer splits its channels in two and conditions one half on the other,
+    # which needs at least two channels: `n_in = 1` gives an empty split and fails later,
+    # inside the residual block, with an unrelated-looking error.
+    n_in < 2 && throw(ArgumentError(
+        "ConditionalLayerGlow needs at least 2 input channels to split, got n_in = $n_in"))
 
     # 1x1 Convolution and residual block for invertible layers
     C  = Conv1x1(n_in; freeze=freeze_conv)

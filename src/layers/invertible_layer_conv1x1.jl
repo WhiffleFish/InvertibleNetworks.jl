@@ -50,6 +50,8 @@ end
 
 Flux.@layer Conv1x1
 
+supports_per_sample_logdet(::Conv1x1) = true
+
 # Constructor with random initializations
 function Conv1x1(k;freeze=false, logdet=false)
     v1 = Parameter(glorot_uniform(k))
@@ -185,8 +187,15 @@ function forward(X::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N
         Yi = chain_lr(Xi, v1, v2, v3)
         selectdim(Y, N, i) .= reshape(Yi, size(selectdim(Y, N, i))...)
     end
-    logdet == true ? (return Y, 0) : (return Y)   # logdet always 0
+    return _conv1x1_out(Y, X, logdet_mode(logdet))   # logdet always 0
 end
+
+# The map is orthogonal, so its log-determinant is zero -- but the shape still has to match
+# whatever the rest of the chain is accumulating.
+_conv1x1_out(Y, ::AbstractArray, ::Val{false}) = Y
+_conv1x1_out(Y, ::AbstractArray{T, N}, ::Val{true}) where {T, N} = (Y, zero(T))
+_conv1x1_out(Y, X::AbstractArray{T, N}, ::Val{:sample}) where {T, N} =
+    (Y, constant_per_sample(X, zero(T)))
 
 # Forward pass and update weights
 function forward(X_tuple::Tuple, C::Conv1x1; set_grad::Bool=true)
@@ -220,7 +229,7 @@ function inverse(Y::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N
         Xi = chain_lr(Yi, v3, v2, v1)
         selectdim(X, N, i) .= reshape(Xi, size(selectdim(X, N, i))...)
     end
-    logdet == true ? (return X, 0) : (return X)   # logdet always 0
+    return _conv1x1_out(X, Y, logdet_mode(logdet))   # logdet always 0
 end
 
 # Inverse pass and update weights

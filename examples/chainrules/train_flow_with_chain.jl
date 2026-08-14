@@ -36,7 +36,8 @@ loss(flow, X) = -log_likelihood(X, flow)
 #     -log_likelihood(Z) - logdet
 
 X = sample_data(batchsize)
-flow(X)     # first pass initializes the ActNorm parameters
+init!(flow, X)     # ActNorm takes its statistics from this batch; until then the flow has
+                   # no map, and `flow.inverse` says so rather than guessing
 
 -log_likelihood(X, flow; normalize=false)
 

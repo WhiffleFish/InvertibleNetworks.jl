@@ -84,6 +84,7 @@ Y, logdet = AN.forward(X)
 - **CouplingLayerHINT**: Invertible recursive coupling layer HINT from Kruse et al. (2020) ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_hint.jl))
 - **CouplingLayerHyperbolic**: Invertible hyperbolic layer from Lensink et al. (2019) ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_hyperbolic.jl))
 - **CouplingLayerIRIM**: Invertible coupling layer from Putzky and Welling (2019) ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_irim.jl))
+- **SigmoidBijector / TanhBijector**: Elementwise bijectors between a bounded interval and the real line, for flows over bounded data
 
 ### Activation Functions
 
@@ -97,6 +98,7 @@ Y, logdet = AN.forward(X)
 ### Utilities
 
 - **Jacobian Computation**: Hand-derived Jacobians for memory efficiency
+- **Per-sample scoring**: `log_likelihood_per_sample`, `forward_per_sample` and `inverse_and_log_likelihood_per_sample` return one log-density per sample from a single batched pass, differentiable with per-example weights
 - **Dimensionality Manipulation**: squeeze/unsqueeze (column, patch, checkerboard), split/cat
 - **Wavelet Transform**
 

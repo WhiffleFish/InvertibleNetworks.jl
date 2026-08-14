@@ -44,6 +44,8 @@ end
 
 Flux.@layer AffineLayer
 
+supports_per_sample_logdet(::AffineLayer) = true
+
 # Constructor: Initialize with nothing
 function AffineLayer(nx::Int64, ny::Int64, nc::Int64; logdet=false)
     s = Parameter(glorot_uniform(nx, ny, nc))
@@ -52,28 +54,37 @@ function AffineLayer(nx::Int64, ny::Int64, nc::Int64; logdet=false)
 end
 
 # Foward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, AL::AffineLayer) where {T, N}
+function forward(X::AbstractArray{T, N}, AL::AffineLayer; logdet=nothing) where {T, N}
 
     Y = X .* AL.s.data .+ AL.b.data
 
     # If logdet true, return as second ouput argument
-    AL.logdet == true ? (return Y, logdet_forward(AL.s)) : (return Y)
+    return _affine_out(Y, X, AL, logdet_mode(isnothing(logdet) ? AL.logdet : logdet), one(T))
 end
 
 # Inverse pass: Input Y, Output X
-function inverse(Y::AbstractArray{T, N}, AL::AffineLayer; eps::T=T(0)) where {T, N}
+function inverse(Y::AbstractArray{T, N}, AL::AffineLayer; eps::T=T(0), logdet=false) where {T, N}
     X = (Y .- AL.b.data) ./ (AL.s.data .+ eps)   # avoid division by 0
-    return X
+    return _affine_out(X, Y, AL, logdet_mode(logdet), -one(T))
 end
 
+# The scaling is shared by the whole batch, so every sample gets the same log-determinant.
+# `sign` is +1 on the forward pass and -1 on the inverse.
+_affine_out(out, ::AbstractArray, ::AffineLayer, ::Val{false}, sign) = out
+_affine_out(out, ::AbstractArray{T, N}, AL::AffineLayer, ::Val{true}, sign) where {T, N} =
+    (out, sign*logdet_forward(AL.s))
+_affine_out(out, X::AbstractArray{T, N}, AL::AffineLayer, ::Val{:sample}, sign) where {T, N} =
+    (out, constant_per_sample(X, T(sign*logdet_forward(AL.s))))
+
 # Backward pass: Input (ΔY, Y), Output (ΔY, Y)
-function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AL::AffineLayer; set_grad::Bool=true) where {T, N}
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AL::AffineLayer; set_grad::Bool=true, logdet_weight=nothing) where {T, N}
+    check_logdet_weight(logdet_weight, set_grad)
     nx, ny, n_in, batchsize = size(Y)
     X = inverse(Y, AL)
     ΔX = ΔY .* AL.s.data
     Δs = sum(ΔY .* X, dims=4)[:,:,:,1]
     if AL.logdet
-        set_grad ? (Δs -= logdet_backward(AL.s)) : (Δs_ = logdet_backward(AL.s))
+        set_grad ? (Δs += logdet_total_weight(logdet_weight)*logdet_backward(AL.s)) : (Δs_ = logdet_backward(AL.s))
     end
     Δb = sum(ΔY, dims=4)[:,:,:,1]
     if set_grad

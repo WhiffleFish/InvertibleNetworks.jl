@@ -73,6 +73,8 @@ CouplingLayerGlow(C::CT, RB::RT, logdet::Bool, activation::AT) where
 
 Flux.@layer CouplingLayerGlow
 
+supports_per_sample_logdet(::CouplingLayerGlow) = true
+
 # Constructor from 1x1 convolution and residual block
 function CouplingLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())
     RB.fan == false && throw("Set ResidualBlock.fan == true")
@@ -85,9 +87,15 @@ CouplingLayerGlow(C::Conv1x1, RB::FluxBlock; logdet=false, activation::Activatio
 # Constructor from input dimensions
 function CouplingLayerGlow(n_in::Int64, n_hidden::Int64; nx=nothing, dense=false, freeze_conv=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, activation::ActivationFunction=SigmoidLayer(), ndims=2)
 
+    # A coupling layer splits its channels in two and conditions one half on the other,
+    # which needs at least two channels: `n_in = 1` gives an empty split and fails later,
+    # inside the residual block, with an unrelated-looking error.
+    n_in < 2 && throw(ArgumentError(
+        "CouplingLayerGlow needs at least 2 input channels to split, got n_in = $n_in"))
+
     # 1x1 Convolution and residual block for invertible layer
     C = Conv1x1(n_in; freeze=freeze_conv)
-   
+
     split_num = Int(round(n_in/2))
     in_chan   = n_in-split_num
     out_chan  = 2*split_num
@@ -105,11 +113,17 @@ end
 CouplingLayerGlow3D(args...;kw...) = CouplingLayerGlow(args...; kw..., ndims=3)
 
 # Forward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, L::CouplingLayerGlow{C,R,A,LD}) where {T,N,C,R,A,LD}
-    return _forward(X, L, Val(LD))
+function forward(X::AbstractArray{T, N}, L::CouplingLayerGlow{C,R,A,LD}; logdet=nothing) where {T,N,C,R,A,LD}
+    return _forward(X, L, logdet_mode(logdet, Val(LD)))
 end
 
-function _forward(X::AbstractArray{T, N}, L::CouplingLayerGlow, ::Val{logdet}) where {T,N,logdet}
+# `Sm` varies from sample to sample, so unlike `ActNorm` this layer has a genuinely
+# per-sample log-determinant; the scalar it returns by default is its batch average.
+_glow_out(Y, ::AbstractArray, ::Val{false}) = Y
+_glow_out(Y, Sm::AbstractArray, ::Val{true}) = (Y, glow_logdet_forward(Sm))
+_glow_out(Y, Sm::AbstractArray, ::Val{:sample}) = (Y, logdet_per_sample(Sm))
+
+function _forward(X::AbstractArray{T, N}, L::CouplingLayerGlow, mode::Val) where {T,N}
     X_ = forward(X, L.C; logdet=false)
     X1, X2 = tensor_split(X_)
 
@@ -121,11 +135,15 @@ function _forward(X::AbstractArray{T, N}, L::CouplingLayerGlow, ::Val{logdet}) w
 
     Y = tensor_cat(Y1, Y2)
 
-    return logdet ? (Y, glow_logdet_forward(Sm)) : Y
+    return _glow_out(Y, Sm, mode)
 end
 
 # Inverse pass: Input Y, Output X
-function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow; save=false) where {T,N}
+#
+# `Sm` is recomputed here anyway, so the log-determinant of the inverse map costs nothing
+# beyond the reduction; pass `logdet=true` to get it. It defaults to `false` rather than to
+# `L.logdet` so that the `save=true` call in `backward` keeps its return shape.
+function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow; save=false, logdet=false) where {T,N}
     Y1, Y2 = tensor_split(Y)
 
     X2 = copy(Y2)
@@ -137,11 +155,17 @@ function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow; save=false) where
     X_ = tensor_cat(X1, X2)
     X = L.C.inverse(X_)
 
-    save == true ? (return X, X1, X2, logSm, Sm) : (return X)
+    save && (return X, X1, X2, logSm, Sm)
+    return _glow_inverse_out(X, Sm, logdet_mode(logdet))
 end
 
+_glow_inverse_out(X, ::AbstractArray, ::Val{false}) = X
+_glow_inverse_out(X, Sm::AbstractArray, ::Val{true}) = (X, -glow_logdet_forward(Sm))
+_glow_inverse_out(X, Sm::AbstractArray, ::Val{:sample}) = (X, -logdet_per_sample(Sm))
+
 # Backward pass: Input (ΔY, Y), Output (ΔX, X)
-function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlow; set_grad::Bool=true) where {T,N}
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlow; set_grad::Bool=true, logdet_weight=nothing) where {T,N}
+    check_logdet_weight(logdet_weight, set_grad)
 
     # Recompute forward state
     X, X1, X2, logS, S = inverse(Y, L; save=true)
@@ -151,7 +175,7 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingL
     ΔT = copy(ΔY1)
     ΔS = ΔY1 .* X1
     if L.logdet
-        set_grad ? (ΔS -= glow_logdet_backward(S)) : (ΔS_ = glow_logdet_backward(S))
+        set_grad ? (ΔS += logdet_scale_grad(S, logdet_weight)) : (ΔS_ = glow_logdet_backward(S))
     end
 
     ΔX1 = ΔY1 .* S
