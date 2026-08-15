@@ -38,6 +38,13 @@ Flux.@layer FluxBlock trainable=(params,)
 
 block_forward(X, FB::FluxBlock) = forward(X, FB)
 
+# A `FluxBlock` differentiates through Zygote, which builds its own forward states inside
+# `backward`, so there is nothing extra worth carrying here: the saved state is the output.
+block_forward_save(X, FB::FluxBlock) = forward(X, FB)
+block_backward(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, ::AbstractArray,
+               FB::FluxBlock; set_grad::Bool=true) where {T, N} =
+    backward(ΔY, X, FB; set_grad=set_grad)
+
 #######################################################################################################################
 # Constructor
 

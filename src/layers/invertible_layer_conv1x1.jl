@@ -109,12 +109,31 @@ function partial_derivative_outer(v::CuArray{T, 1}) where T
 end
 
 
-function mat_tens_i(out::AbstractVector{T}, Mat::AbstractArray{T, 2},
-                    Tens::AbstractArray{T, 3}, Mat2::AbstractArray{T, 2}) where T
-    # Computes sum( (Mat * tens) .* Mat2) for each element in the batch
-    isa(Mat, CUDA.CuArray) && (Mat2 = CUDA.CuArray(Mat2)) #new Julia 1.10 subarrays require this
-    copyto!(out, map(i -> dot(Mat * Tens[i, :, :], Mat2), 1:size(Tens, 1)))
-    return out
+# Everything the Householder weight gradients need from the data: the channel-by-channel
+# Gram matrix `-2 * Σ_i X_i' * ΔY_i`, summed over samples and spatial positions. Each `∂V`
+# slice then enters as a plain inner product against it, because
+#
+#     sum((-2 X_i * ∂V[m]) .* ΔY_i) = ⟨∂V[m], -2 X_i' ΔY_i⟩,
+#
+# so the contraction over the batch can happen once instead of once per `∂V` slice per
+# sample. The former per-sample `Mat * Tens[i, :, :]` products rebuilt this same quantity one
+# tiny matrix at a time and allocated far more than they computed.
+function channel_gram(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N}) where {T, N}
+    k, batchsize = size(X, N-1), size(X, N)
+    Xm, ΔYm = reshape(X, :, k, batchsize), reshape(ΔY, :, k, batchsize)
+    G = cuzeros(X, k, k)
+    @inbounds for i = 1:batchsize
+        mul!(G, adjoint(view(Xm, :, :, i)), view(ΔYm, :, :, i), T(-2), one(T))
+    end
+    return G
+end
+
+# A loop of small GEMMs is the wrong shape for a GPU; batch them into one call instead.
+function channel_gram(X::CuArray{T, N}, ΔY::CuArray{T, N}) where {T, N}
+    k, batchsize = size(X, N-1), size(X, N)
+    Xm, ΔYm = reshape(X, :, k, batchsize), reshape(ΔY, :, k, batchsize)
+    G = NNlib.batched_mul(NNlib.batched_adjoint(Xm), ΔYm)
+    return T(-2) .* dropdims(sum(G; dims=3); dims=3)
 end
 
 function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
@@ -149,32 +168,44 @@ function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
     for i=1:k
         # dV1
         mul!(tmp, dV1[i, :, :], M1)
-        @views adjoint ? copyto!(dV1[i, :, :], tmp') : copyto!(dV1[i, :, :], tmp)
+        @views copyto!(dV1[i, :, :], tmp)
         # dV2
         v2 = dV2[i, :, :]
         broadcast!(+, tmp, v2, 4 * V1 * v2 * V3 - 2 * (V1 * v2 + v2 * V3))
-        @views adjoint ? copyto!(dV2[i, :, :], tmp') : copyto!(dV2[i, :, :], tmp)
+        @views copyto!(dV2[i, :, :], tmp)
         # dV3
         mul!(tmp, M3, dV3[i, :, :])
-        @views adjoint ? copyto!(dV3[i, :, :], tmp') : copyto!(dV3[i, :, :], tmp)
+        @views copyto!(dV3[i, :, :], tmp)
     end
 
-    n_in, batchsize = size(X)[N-1:N]
-    prod_res = cuzeros(X, size(dV1, 1))
-    for i=1:batchsize
-        Xi = -2f0*reshape(selectdim(X, N, i), :, n_in)
-        ΔYi = reshape(selectdim(ΔY, N, i), :, n_in)
-        broadcast!(+, dv1, dv1, mat_tens_i(prod_res, Xi, dV1, ΔYi))
-        broadcast!(+, dv2, dv2, mat_tens_i(prod_res, Xi, dV2, ΔYi))
-        broadcast!(+, dv3, dv3, mat_tens_i(prod_res, Xi, dV3, ΔYi))
-    end
+    # The `∂V` slices used to be transposed one at a time above; `⟨A', G⟩ == ⟨A, G'⟩` moves
+    # that single transpose onto the k x k Gram matrix instead.
+    G = channel_gram(X, ΔY)
+    g = vec(adjoint ? permutedims(G) : G)
+    mul!(dv1, reshape(dV1, k, k*k), g)
+    mul!(dv2, reshape(dV2, k, k*k), g)
+    mul!(dv3, reshape(dV3, k, k*k), g)
     return dv1, dv2, dv3
 end
 
 
 # Forward pass
-function forward(X::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N}
-    isnothing(logdet) ? logdet = C.logdet : logdet = logdet
+#
+# The log-determinant mode is resolved into a `Val` before the work starts, so that a caller
+# passing `logdet=false` -- every coupling layer, on every pass -- gets a return shape
+# inference can see. Reassigning a local `logdet` here instead left the return a three-way
+# union that propagated into the callers' hot paths.
+forward(X::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N} =
+    _conv1x1_forward(X, C, logdet_mode(isnothing(logdet) ? C.logdet : logdet))
+
+# The map is orthogonal, so its log-determinant is identically zero and a caller that only
+# wants the mapping has nothing to gain from asking for it. Taking the mode as a `Val`
+# argument makes the return type a property of the call rather than something constant
+# propagation has to recover from a `logdet=false` keyword -- which it does not do.
+conv1x1_forward(X::AbstractArray, C::Conv1x1) = _conv1x1_forward(X, C, Val(false))
+conv1x1_inverse(Y::AbstractArray, C::Conv1x1) = _conv1x1_inverse(Y, C, Val(false))
+
+function _conv1x1_forward(X::AbstractArray{T, N}, C::Conv1x1, mode::Val) where {T, N}
     Y = cuzeros(X, size(X)...)
     n_in = size(X, N-1)
 
@@ -187,7 +218,7 @@ function forward(X::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N
         Yi = chain_lr(Xi, v1, v2, v3)
         selectdim(Y, N, i) .= reshape(Yi, size(selectdim(Y, N, i))...)
     end
-    return _conv1x1_out(Y, X, logdet_mode(logdet))   # logdet always 0
+    return _conv1x1_out(Y, X, mode)   # logdet always 0
 end
 
 # The map is orthogonal, so its log-determinant is zero -- but the shape still has to match
@@ -201,8 +232,8 @@ _conv1x1_out(Y, X::AbstractArray{T, N}, ::Val{:sample}) where {T, N} =
 function forward(X_tuple::Tuple, C::Conv1x1; set_grad::Bool=true)
     ΔX = X_tuple[1]
     X = X_tuple[2]
-    ΔY = forward(ΔX, C; logdet=false)    # forward propagate residual
-    Y = forward(X, C; logdet=false)  # recompute forward state
+    ΔY = conv1x1_forward(ΔX, C)    # forward propagate residual
+    Y = conv1x1_forward(X, C)      # recompute forward state
     Δv1, Δv2, Δv3 = conv1x1_grad_v(Y, ΔX, C; adjoint=true)  # gradient w.r.t. weights
     if set_grad
         isnothing(C.v1.grad) ? (C.v1.grad = Δv1) : (C.v1.grad += Δv1)
@@ -214,9 +245,11 @@ function forward(X_tuple::Tuple, C::Conv1x1; set_grad::Bool=true)
     set_grad ? (return ΔY, Y) : (return ΔY, Δθ, Y)
 end
 
-# Inverse pass
-function inverse(Y::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N}
-    isnothing(logdet) ? logdet = C.logdet : logdet = logdet
+# Inverse pass (see `forward` on why the mode is resolved before the work)
+inverse(Y::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N} =
+    _conv1x1_inverse(Y, C, logdet_mode(isnothing(logdet) ? C.logdet : logdet))
+
+function _conv1x1_inverse(Y::AbstractArray{T, N}, C::Conv1x1, mode::Val) where {T, N}
     X = cuzeros(Y, size(Y)...)
     n_in = size(X, N-1)
 
@@ -229,28 +262,46 @@ function inverse(Y::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N
         Xi = chain_lr(Yi, v3, v2, v1)
         selectdim(X, N, i) .= reshape(Xi, size(selectdim(X, N, i))...)
     end
-    return _conv1x1_out(X, Y, logdet_mode(logdet))   # logdet always 0
+    return _conv1x1_out(X, Y, mode)   # logdet always 0
 end
 
 # Inverse pass and update weights
 function inverse(Y_tuple::Tuple, C::Conv1x1; set_grad::Bool=true)
     ΔY = Y_tuple[1]
     Y = Y_tuple[2]
-    ΔX = inverse(ΔY, C; logdet=false)    # derivative w.r.t. input
-    X = inverse(Y, C; logdet=false)  # recompute forward state
+    X = conv1x1_inverse(Y, C)  # recompute forward state
+    if set_grad
+        return inverse_grad(ΔY, X, C), X
+    end
+    ΔX, Δθ = inverse_grad(ΔY, X, C; set_grad=false)
+    return ΔX, Δθ, X
+end
+
+"""
+    ΔX = inverse_grad(ΔY, X, C::Conv1x1)
+
+ Backward pass of `inverse` for a caller that already holds `X = C.inverse(Y)` -- as the
+ coupling layers do, having inverted `Y` on their own recomputation pass. `Y` is not inverted
+ a second time; only the residual is propagated and the Householder gradients accumulated.
+"""
+inverse_grad(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, C::Conv1x1;
+             set_grad::Bool=true) where {T, N} =
+    _inverse_grad(ΔY, X, C, Val(set_grad))
+
+function _inverse_grad(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, C::Conv1x1,
+                       ::Val{grad}) where {T, N, grad}
+    ΔX = conv1x1_inverse(ΔY, C)          # derivative w.r.t. input
 
     # Gradient w.r.t. weights
     # Will be zeros if layer is frozen (not learnable)
-    Δv1, Δv2, Δv3 =  conv1x1_grad_v(X, ΔY, C) 
-    if set_grad
+    Δv1, Δv2, Δv3 = conv1x1_grad_v(X, ΔY, C)
+    if grad
         isnothing(C.v1.grad) ? (C.v1.grad = Δv1) : (C.v1.grad += Δv1)
         isnothing(C.v2.grad) ? (C.v2.grad = Δv2) : (C.v2.grad += Δv2)
         isnothing(C.v3.grad) ? (C.v3.grad = Δv3) : (C.v3.grad += Δv3)
-    else
-        Δθ = [Parameter(Δv1), Parameter(Δv2), Parameter(Δv3)]
+        return ΔX
     end
-
-    set_grad ? (return ΔX, X) : (return ΔX, Δθ, X)
+    return ΔX, [Parameter(Δv1), Parameter(Δv2), Parameter(Δv3)]
 end
 
 

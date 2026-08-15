@@ -96,15 +96,19 @@ reverse(RL::Reversed) = tag_as_reversed!(deepcopy(RL.I), false)
 """
 function get_params(I::Invertible)
     params = Vector{Parameter}(undef, 0)
-    for (f, tp) ∈ zip(fieldnames(typeof(I)), typeof(I).types)
-        p = getfield(I, f)
-        if tp <: Parameter
-            append!(params, [p])
-        else
-            append!(params, get_params(p))
-        end
-    end
+    _collect_params!(params, I)
     params
+end
+
+# Walks the fields once, appending in place. The former version boxed every parameter in a
+# one-element array to `append!` it, which is a per-parameter allocation on a function the
+# AD path calls several times per gradient.
+@generated function _collect_params!(params::Vector{Parameter}, I::T) where {T<:Invertible}
+    pushes = map(1:fieldcount(T)) do i
+        fieldtype(T, i) <: Parameter ? :(push!(params, getfield(I, $i))) :
+                                       :(append!(params, get_params(getfield(I, $i))))
+    end
+    return Expr(:block, pushes..., :(nothing))
 end
 
 get_params(x) = Array{Parameter}(undef, 0)

@@ -124,16 +124,16 @@ _glow_out(Y, Sm::AbstractArray, ::Val{true}) = (Y, glow_logdet_forward(Sm))
 _glow_out(Y, Sm::AbstractArray, ::Val{:sample}) = (Y, logdet_per_sample(Sm))
 
 function _forward(X::AbstractArray{T, N}, L::CouplingLayerGlow, mode::Val) where {T,N}
-    X_ = forward(X, L.C; logdet=false)
+    X_ = conv1x1_forward(X, L.C)
     X1, X2 = tensor_split(X_)
 
-    Y2 = copy(X2)
     logS_T = block_forward(X2, L.RB)
     logSm, Tm = tensor_split(logS_T)
     Sm = L.activation.forward(logSm)
-    Y1 = Sm.*X1 + Tm
+    Y1 = @. Sm * X1 + Tm
 
-    Y = tensor_cat(Y1, Y2)
+    # The second half passes through unchanged, and `tensor_cat` copies it anyway.
+    Y = tensor_cat(Y1, X2)
 
     return _glow_out(Y, Sm, mode)
 end
@@ -144,19 +144,25 @@ end
 # beyond the reduction; pass `logdet=true` to get it. It defaults to `false` rather than to
 # `L.logdet` so that the `save=true` call in `backward` keeps its return shape.
 function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow; save=false, logdet=false) where {T,N}
-    Y1, Y2 = tensor_split(Y)
-
-    X2 = copy(Y2)
-    logS_T = block_forward(X2, L.RB)
-    logSm, Tm = tensor_split(logS_T)
-    Sm = L.activation.forward(logSm)
-    X1 = (Y1 - Tm) ./ (Sm .+ eps(T)) # add epsilon to avoid division by 0
-
-    X_ = tensor_cat(X1, X2)
-    X = L.C.inverse(X_)
-
-    save && (return X, X1, X2, logSm, Sm)
+    save && (return _inverse(Y, L, Val(true))[1:5])
+    X, _, _, _, Sm, _ = _inverse(Y, L, Val(false))
     return _glow_inverse_out(X, Sm, logdet_mode(logdet))
+end
+
+# Shared inverse, with `save` selecting how much of the recomputed state comes back.
+# `backward` asks for the saved residual-block state (`Val(true)`) so that the block's
+# forward pass, which happens here regardless, is not run a second time inside its backward.
+function _inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow, ::Val{save}) where {T,N,save}
+    Y1, X2 = tensor_split(Y)   # the second half is the identity branch
+
+    rb = save ? block_forward_save(X2, L.RB) : block_forward(X2, L.RB)
+    logSm, Tm = tensor_split(block_output(rb))
+    Sm = L.activation.forward(logSm)
+    X1 = @. (Y1 - Tm) / (Sm + eps(T)) # add epsilon to avoid division by 0
+
+    X = conv1x1_inverse(tensor_cat(X1, X2), L.C)
+
+    return X, X1, X2, logSm, Sm, rb
 end
 
 _glow_inverse_out(X, ::AbstractArray, ::Val{false}) = X
@@ -167,30 +173,35 @@ _glow_inverse_out(X, Sm::AbstractArray, ::Val{:sample}) = (X, -logdet_per_sample
 function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlow; set_grad::Bool=true, logdet_weight=nothing) where {T,N}
     check_logdet_weight(logdet_weight, set_grad)
 
-    # Recompute forward state
-    X, X1, X2, logS, S = inverse(Y, L; save=true)
+    # Recompute forward state, keeping the residual block's own intermediates: its backward
+    # pass below would otherwise run its forward a second time.
+    X, X1, X2, logS, S, rb = _inverse(Y, L, Val(true))
 
     # Backpropagate residual
     ΔY1, ΔY2 = tensor_split(ΔY)
-    ΔT = copy(ΔY1)
+    ΔT = ΔY1                    # `tensor_cat` below copies it, so no copy is needed here
     ΔS = ΔY1 .* X1
     if L.logdet
-        set_grad ? (ΔS += logdet_scale_grad(S, logdet_weight)) : (ΔS_ = glow_logdet_backward(S))
+        set_grad ? (ΔS .+= logdet_scale_grad(S, logdet_weight)) : (ΔS_ = glow_logdet_backward(S))
     end
 
     ΔX1 = ΔY1 .* S
+    ΔlogS = backward(ΔS, logS, S, L.activation)
     if set_grad
-        ΔX2 = L.RB.backward(tensor_cat(backward(ΔS, logS, S, L.activation), ΔT), X2) + ΔY2
+        ΔX2 = block_backward(tensor_cat(ΔlogS, ΔT), X2, rb, L.RB)
+        ΔX2 .+= ΔY2
     else
-        ΔX2, Δθrb = L.RB.backward(tensor_cat(backward(ΔS, logS, S, L.activation), ΔT; ), X2; set_grad=set_grad)
-        _, ∇logdet = L.RB.backward(tensor_cat(backward(ΔS, logS, S, L.activation), 0f0.*ΔT;), X2; set_grad=set_grad)
+        # Both passes reuse `rb`, so the block's forward pass is paid for once, not twice.
+        ΔX2, Δθrb = block_backward(tensor_cat(ΔlogS, ΔT), X2, rb, L.RB; set_grad=set_grad)
+        _, ∇logdet = block_backward(tensor_cat(ΔlogS, 0f0.*ΔT), X2, rb, L.RB; set_grad=set_grad)
         ΔX2 += ΔY2
     end
     ΔX_ = tensor_cat(ΔX1, ΔX2)
     if set_grad
-        ΔX = L.C.inverse((ΔX_, tensor_cat(X1, X2)))[1]
+        # `X` is already the 1x1 convolution's inverse of `tensor_cat(X1, X2)`, from above.
+        ΔX = inverse_grad(ΔX_, X, L.C)
     else
-        ΔX, Δθc = L.C.inverse((ΔX_, tensor_cat(X1, X2)); set_grad=set_grad)[1:2]
+        ΔX, Δθc = inverse_grad(ΔX_, X, L.C; set_grad=set_grad)
         Δθ = cat(Δθc, Δθrb; dims=1)
     end
 

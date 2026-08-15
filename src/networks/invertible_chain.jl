@@ -372,8 +372,9 @@ _per_sample_weight(::Nothing, logdet::AbstractVector) = zero(logdet)
 # actually asked for, so there is nothing to correct afterwards.
 function _flow_backward_weighted(net::Invertible, ΔZ, Z, w)
     params = get_params(net)
-    # `Conv1x1` accumulates into `p.grad` where every other layer overwrites.
-    clear_grad!(net)
+    # `Conv1x1` accumulates into `p.grad` where every other layer overwrites. Cleared through
+    # `params` rather than through `net`, which would walk the network a second time.
+    clear_grad!(params)
     ΔX, _ = backward(copy(ΔZ), copy(Z), net; logdet_weight=w)
     return ΔX, getfield.(params, :grad)
 end
@@ -405,12 +406,12 @@ function _flow_backward(net::Invertible, ΔZ, Z, weight)
     # `Conv1x1` accumulates into `p.grad` where every other layer overwrites, so the slate
     # has to be clean for each pass: otherwise leftover gradients (or the first pass's own
     # results) leak into the numbers below.
-    clear_grad!(net)
+    clear_grad!(params)
     ΔX, _ = backward(copy(ΔZ), copy(Z), net)
     Δθ = getfield.(params, :grad)
 
     if weight != -1
-        clear_grad!(net)
+        clear_grad!(params)
         ΔX_offset, _ = backward(zero(ΔZ), copy(Z), net)
         Δθ_offset = getfield.(params, :grad)
         correction = 1 + weight

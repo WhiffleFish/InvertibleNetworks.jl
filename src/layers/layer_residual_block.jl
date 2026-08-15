@@ -122,13 +122,25 @@ forward(X1::AbstractArray{T,N}, RB::ResidualBlock; save=false) where {T,N} =
 # Fixed-shape internal path for coupling layers that never request saved states.
 block_forward(X, RB::ResidualBlock) = _forward(X, RB, Val(false))
 
+# The forward states `block_backward` needs. A coupling layer runs this block's forward pass
+# on its own `inverse`, so handing the states straight to `block_backward` saves running it a
+# second time -- a full extra forward pass per layer per backward call.
+block_forward_save(X, RB::ResidualBlock) = _forward(X, RB, Val(true))
+
+# The block's output, whether it comes from `block_forward` (the output alone) or from
+# `block_forward_save` (the output plus the intermediates its backward needs).
+block_output(Y::AbstractArray) = Y
+block_output(state::NTuple{6,AbstractArray}) = state[6]
+
 function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{save}) where {T, N, save}
     inds = channel_indices(Val(N))
 
-    Y1 = conv(X1, RB.W1.data; stride=RB.strides[1], pad=RB.pad[1]) .+ reshape(RB.b1.data, inds...)
+    Y1 = conv(X1, RB.W1.data; stride=RB.strides[1], pad=RB.pad[1])
+    Y1 .+= reshape(RB.b1.data, inds...)
     X2 = RB.activation.forward(Y1)
 
-    Y2 = X2 + conv(X2, RB.W2.data; stride=RB.strides[2], pad=RB.pad[2]) .+ reshape(RB.b2.data, inds...)
+    Y2 = conv(X2, RB.W2.data; stride=RB.strides[2], pad=RB.pad[2])
+    Y2 .+= X2 .+ reshape(RB.b2.data, inds...)
     X3 = RB.activation.forward(Y2)
 
     cdims3 = DCDims(X1, RB.W3.data; stride=RB.strides[1], padding=RB.pad[1])
@@ -140,13 +152,20 @@ function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{save}) where
 end
 
 # Backward
-function backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N},
-                  RB::ResidualBlock; set_grad::Bool=true) where {T, N}
+backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N}, RB::ResidualBlock;
+         set_grad::Bool=true) where {T, N} =
+    block_backward(ΔX4, X1, block_forward_save(X1, RB), RB; set_grad=set_grad)
+
+# Backward from already-recomputed forward states, as produced by `block_forward_save`.
+function block_backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N},
+                        state::NTuple{6,AbstractArray{T, N}}, RB::ResidualBlock;
+                        set_grad::Bool=true) where {T, N}
     inds = channel_indices(Val(N))
     dims = batch_reduction_dims(Val(N))
 
-    # Recompute forward states from input X
-    Y1, Y2, Y3, X2, X3, X4 = forward(X1, RB; save=true)
+    # `X2` and `X3` are the activations of `Y1` and `Y2`; taking them from the saved state
+    # rather than reapplying the activation is what makes the state worth carrying.
+    Y1, Y2, Y3, X2, X3, X4 = state
 
     # Cdims
     cdims2 = DenseConvDims(Y2, RB.W2.data; stride=RB.strides[2], padding=RB.pad[2])
@@ -155,11 +174,12 @@ function backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N},
     # Backpropagate residual ΔX4 and compute gradients
     RB.fan == true ? (ΔY3 = backward(ΔX4, Y3, X4, RB.activation)) : (ΔY3 = GaLUgrad(ΔX4, Y3))
     ΔX3 = conv(ΔY3, RB.W3.data, cdims3)
-    ΔW3 = ∇conv_filter(ΔY3, RB.activation.forward(Y2), cdims3)
+    ΔW3 = ∇conv_filter(ΔY3, X3, cdims3)
 
     ΔY2 = backward(ΔX3, Y2, X3, RB.activation)
-    ΔX2 = ∇conv_data(ΔY2, RB.W2.data, cdims2) + ΔY2
-    ΔW2 = ∇conv_filter(RB.activation.forward(Y1), ΔY2, cdims2)
+    ΔX2 = ∇conv_data(ΔY2, RB.W2.data, cdims2)
+    ΔX2 .+= ΔY2
+    ΔW2 = ∇conv_filter(X2, ΔY2, cdims2)
     Δb2 = sum(ΔY2, dims=dims)[inds...]
 
     cdims1 = DenseConvDims(X1, RB.W1.data; stride=RB.strides[1], padding=RB.pad[1])
