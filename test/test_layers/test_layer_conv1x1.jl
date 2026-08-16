@@ -320,3 +320,47 @@ dX_, dθ_, _ = C.adjointJacobianInverse(dY_, Y)
 a = dot(dY, dY_)
 b = dot(dX, dX_)+dot(dθ, dθ_)
 @test isapprox(a, b; rtol=1f-3)
+
+###################################################################################################
+# Array-form backward: the signature every chain of layers calls
+
+Cb = Conv1x1(k)
+Xb = randn(Float32, nx, ny, k, batchsize)
+Yb = Cb.forward(Xb)
+ΔYb = randn(Float32, nx, ny, k, batchsize)
+
+clear_grad!(Cb)
+ΔXb, Xb_ = Cb.backward(copy(ΔYb), copy(Yb))
+@test isapprox(norm(Xb_ - Xb)/norm(Xb), 0f0; atol=1f-5)
+@test ~isnothing(Cb.v1.grad)
+
+# Same thing the tuple form has always computed
+Cb2 = Conv1x1(copy(Cb.v1.data), copy(Cb.v2.data), copy(Cb.v3.data))
+clear_grad!(Cb2)
+ΔXt, _ = Cb2.inverse((copy(ΔYb), copy(Yb)))
+@test ΔXb ≈ ΔXt
+@test Cb.v1.grad ≈ Cb2.v1.grad
+@test Cb.v3.grad ≈ Cb2.v3.grad
+
+# The map is orthogonal, so `backward` propagates its adjoint: ⟨W dX, ΔY⟩ == ⟨dX, W' ΔY⟩
+dXa = randn(Float32, nx, ny, k, batchsize)
+@test isapprox(dot(Cb.forward(dXa), ΔYb), dot(dXa, ΔXb); rtol=1f-4)
+
+# Gradients accumulate into `p.grad` rather than overwriting it, as the coupling layers rely on
+g1 = copy(Cb.v1.grad)
+Cb.backward(copy(ΔYb), copy(Yb))
+@test isapprox(Cb.v1.grad, 2 .* g1; rtol=1f-4)
+
+# Reversed layer: `.backward` maps to `backward_inv`, which pushes the cotangent through the
+# forward map instead
+Cr = Conv1x1(copy(Cb.v1.data), copy(Cb.v2.data), copy(Cb.v3.data))
+Xr = Cr.inverse(Yb)
+clear_grad!(Cr)
+ΔYr, Yr = reverse(Cr).backward(copy(ΔYb), copy(Xr))
+@test isapprox(norm(Yr - Yb)/norm(Yb), 0f0; atol=1f-5)
+@test isapprox(dot(Cr.inverse(dXa), ΔYb), dot(dXa, ΔYr); rtol=1f-4)
+
+Cr2 = Conv1x1(copy(Cb.v1.data), copy(Cb.v2.data), copy(Cb.v3.data))
+clear_grad!(Cr2)
+ΔYt, _ = Cr2.forward((copy(ΔYb), copy(Xr)))
+@test ΔYr ≈ ΔYt

@@ -47,6 +47,14 @@ Order   = [:type]
 Filter = t -> t<:InvertibleNetwork
 ```
 
+## Augmented flows
+
+```@autodocs
+Modules = [InvertibleNetworks]
+Order   = [:function]
+Pages = ["augmented_flow.jl"]
+```
+
 ## AD Integration
 
 ```@autodocs

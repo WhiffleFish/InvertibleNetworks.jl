@@ -116,6 +116,11 @@ Y, logdet = AN.forward(X)
 - **NetworkConditionalGlow**: Conditional Glow networks
 - **NetworkConditionalHINT**: Conditional HINT networks
 
+### Composition
+
+- **InvertibleChain**: `Flux.Chain`-style composition of layers, with automatic log-determinant accumulation ([source](src/networks/invertible_chain.jl))
+- **AugmentedFlow**: Runs a flow on the data padded with auxiliary latent variables, trading the exact likelihood for a variational lower bound in exchange for expressivity the data's own dimensionality cannot provide — augmented normalizing flows (Huang et al., 2020) and VFlow (Chen et al., 2020) ([source](src/networks/augmented_flow.jl))
+
 
 ## 🔍 Uncertainty-aware Image Reconstruction
 

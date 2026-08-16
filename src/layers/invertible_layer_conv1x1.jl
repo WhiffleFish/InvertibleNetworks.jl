@@ -31,7 +31,9 @@ export Conv1x1
 
  - Forward mode: `Y, logdet = C.forward(X)`
 
- - Backward mode: `ΔX, X = C.backward((ΔY, Y))`
+ - Inverse mode: `X = C.inverse(Y)`
+
+ - Backward mode: `ΔX, X = C.backward(ΔY, Y)`
 
  *Trainable parameters:*
 
@@ -275,6 +277,42 @@ function inverse(Y_tuple::Tuple, C::Conv1x1; set_grad::Bool=true)
     end
     ΔX, Δθ = inverse_grad(ΔY, X, C; set_grad=false)
     return ΔX, Δθ, X
+end
+
+"""
+    ΔX, X = backward(ΔY, Y, C::Conv1x1)
+
+ Backward pass in the array form every other layer implements, so that a `Conv1x1` can sit
+ inside an [`InvertibleChain`](@ref) (or any other caller that backpropagates through a chain
+ of layers with `backward(ΔY, Y, layer)`).
+
+ Same computation as `C.inverse((ΔY, Y))`: the map is orthogonal, so the adjoint of the
+ forward map is the inverse map. The Householder gradients are *accumulated* into `C.v1.grad`
+ etc. rather than overwritten, as they have always been -- the caller is responsible for
+ clearing them between passes, which is what `InvertibleChain`'s pullback does.
+
+ `logdet_weight` is accepted for interface parity and validated like everywhere else, but has
+ nothing to weight here: the log-determinant of an orthogonal map is identically zero and in
+ particular does not depend on the Householder vectors.
+"""
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::Conv1x1;
+                  set_grad::Bool=true, logdet_weight=nothing) where {T, N}
+    check_logdet_weight(logdet_weight, set_grad)
+    return inverse((ΔY, Y), C; set_grad=set_grad)
+end
+
+## Reverse-layer functions
+"""
+    ΔY, Y = backward_inv(ΔX, X, C::Conv1x1)
+
+ Backward pass of a reversed `Conv1x1`, which applies `inverse` in its forward direction: the
+ cotangent is pushed through the forward map, and the Householder gradients accumulated as in
+ [`backward`](@ref).
+"""
+function backward_inv(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::Conv1x1;
+                      set_grad::Bool=true, logdet_weight=nothing) where {T, N}
+    check_logdet_weight(logdet_weight, set_grad)
+    return forward((ΔX, X), C; set_grad=set_grad)
 end
 
 """

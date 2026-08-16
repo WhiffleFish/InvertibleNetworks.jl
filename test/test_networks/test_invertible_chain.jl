@@ -106,6 +106,71 @@ end
     @test all(got[k] == expected[i] for (k, i) in enumerate(order))
 end
 
+@testset "Conv1x1 composes inside a chain" begin
+    # `InvertibleChain.backward` calls `backward(ΔY, Y, layer)` on every layer, so a layer
+    # that only implemented the tuple form was unusable in a chain the moment anything asked
+    # for a gradient -- and `Conv1x1` is the standard channel mixer of a Glow-style stack.
+    Random.seed!(9)
+    flow = InvertibleChain(ActNorm(n_in; logdet=true),
+                           Conv1x1(n_in),
+                           CouplingLayerGlow(n_in, n_hidden; logdet=true),
+                           Conv1x1(n_in),
+                           ActNorm(n_in; logdet=true))
+    flow.forward(X)
+
+    Z, lgdet = flow.forward(X)
+    @test lgdet isa Float32
+    @test isapprox(flow.inverse(Z), X; rtol=1f-5)
+
+    clear_grad!(flow)
+    ΔX, X̂ = flow.backward(randn(Float32, size(Z)...), copy(Z))
+    @test size(ΔX) == size(X)
+    @test isapprox(X̂, X; rtol=1f-4)
+    @test all(!isnothing(p.grad) for p in get_params(flow))
+
+    loss(m) = -log_likelihood(X, m)
+    l, grads = Flux.withgradient(loss, flow)
+    @test isfinite(l)
+    g = Flux.trainables(grads[1])
+    @test length(g) == length(Flux.trainables(flow))
+    @test all(gi -> !isnothing(gi) && all(isfinite, gi), g)
+
+    # Directional derivative against a central finite difference, over all parameters at
+    # once: this checks the Householder gradients themselves, not just that a method exists.
+    base = [copy(p) for p in Flux.trainables(flow)]
+    dir = [randn(Float32, size(p)...) for p in base]
+    dderiv = sum(dot(gi, di) for (gi, di) in zip(g, dir))
+
+    δ = 1f-3
+    for (p, b, u) in zip(Flux.trainables(flow), base, dir); p .= b .+ δ.*u; end
+    lp = loss(flow)
+    for (p, b, u) in zip(Flux.trainables(flow), base, dir); p .= b .- δ.*u; end
+    lm = loss(flow)
+    for (p, b) in zip(Flux.trainables(flow), base); p .= b; end
+    @test isapprox((lp - lm)/(2δ), dderiv; rtol=5f-2, atol=1f-2)
+
+    # Only the Householder vectors, so a wrong `Conv1x1` gradient cannot hide behind the
+    # coupling layers' much larger contribution.
+    conv_params = vcat([[C.v1.data, C.v2.data, C.v3.data] for C in (flow[2], flow[4])]...)
+    positions = IdDict{Any,Int}(p => i for (i, p) in enumerate(Flux.trainables(flow)))
+    idx = [positions[p] for p in conv_params]
+    vdir = [randn(Float32, size(p)...) for p in conv_params]
+    vderiv = sum(dot(g[i], d) for (i, d) in zip(idx, vdir))
+
+    for (p, b, u) in zip(conv_params, base[idx], vdir); p .= b .+ δ.*u; end
+    lp = loss(flow)
+    for (p, b, u) in zip(conv_params, base[idx], vdir); p .= b .- δ.*u; end
+    lm = loss(flow)
+    for (p, b) in zip(conv_params, base[idx]); p .= b; end
+    @test isapprox((lp - lm)/(2δ), vderiv; rtol=5f-2, atol=1f-3)
+    @test abs(vderiv) > 1f-3        # the direction actually moves the loss
+
+    # And per-sample weights reach the chain the same way
+    w = rand(Float32, batchsize)
+    _, wgrads = Flux.withgradient(m -> -sum(w .* log_likelihood_per_sample(X, m)), flow)
+    @test all(gi -> !isnothing(gi) && all(isfinite, gi), Flux.trainables(wgrads[1]))
+end
+
 @testset "gradient honors any logdet weight" begin
     # `backward(ΔZ) = A(ΔZ) - B` is affine in the cotangent, so recover A and B from two
     # passes and require the AD gradient to equal `A + w*B` for whatever weight the loss

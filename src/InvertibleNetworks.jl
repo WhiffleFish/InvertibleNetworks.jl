@@ -140,6 +140,10 @@ include("networks/summarized_net.jl")
 # Chain-style composition (needs the layer/network types above to be defined)
 include("networks/invertible_chain.jl")
 
+# Augmented flows: Huang et al. (2020), Chen et al. (2020)
+# (needs the chain's `flow_forward`/`forward_per_sample` AD entry points)
+include("networks/augmented_flow.jl")
+
 # Jacobians
 include("utils/jacobian.jl")
 
