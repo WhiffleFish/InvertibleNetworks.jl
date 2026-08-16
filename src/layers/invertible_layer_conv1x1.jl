@@ -207,19 +207,13 @@ forward(X::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N} =
 conv1x1_forward(X::AbstractArray, C::Conv1x1) = _conv1x1_forward(X, C, Val(false))
 conv1x1_inverse(Y::AbstractArray, C::Conv1x1) = _conv1x1_inverse(Y, C, Val(false))
 
+# The Householder chain is one orthogonal matrix, and it is the same one for every sample, so
+# the whole batch is a single contraction against it. Applying the reflectors sample by sample
+# -- as this did -- turned each pass into `batchsize` rank-1 BLAS-2 updates on a `1 x k` slice,
+# which is why the per-sample cost used to be flat in the batch size instead of amortizing.
 function _conv1x1_forward(X::AbstractArray{T, N}, C::Conv1x1, mode::Val) where {T, N}
-    Y = cuzeros(X, size(X)...)
-    n_in = size(X, N-1)
-
-    v1 = C.v1.data
-    v2 = C.v2.data
-    v3 = C.v3.data
-
-    for i=1:size(X, N)
-        Xi = reshape(selectdim(X, N, i), :, n_in)
-        Yi = chain_lr(Xi, v1, v2, v3)
-        selectdim(Y, N, i) .= reshape(Yi, size(selectdim(Y, N, i))...)
-    end
+    Q = householder_matrix(C.v1.data, C.v2.data, C.v3.data)
+    Y = apply_channel_matrix(X, Q)
     return _conv1x1_out(Y, X, mode)   # logdet always 0
 end
 
@@ -251,19 +245,12 @@ end
 inverse(Y::AbstractArray{T, N}, C::Conv1x1; logdet=nothing) where {T, N} =
     _conv1x1_inverse(Y, C, logdet_mode(isnothing(logdet) ? C.logdet : logdet))
 
+# Reflectors are their own inverses, so the reversed chain is the transpose of the forward
+# matrix; it is built from the reversed vectors here to keep the correspondence with
+# `_conv1x1_forward` visible rather than implied.
 function _conv1x1_inverse(Y::AbstractArray{T, N}, C::Conv1x1, mode::Val) where {T, N}
-    X = cuzeros(Y, size(Y)...)
-    n_in = size(X, N-1)
-
-    v1 = C.v1.data
-    v2 = C.v2.data
-    v3 = C.v3.data
-
-    for i=1:size(Y, N)
-        Yi = reshape(selectdim(Y, N, i), :, n_in)
-        Xi = chain_lr(Yi, v3, v2, v1)
-        selectdim(X, N, i) .= reshape(Xi, size(selectdim(X, N, i))...)
-    end
+    Qinv = householder_matrix(C.v3.data, C.v2.data, C.v1.data)
+    X = apply_channel_matrix(Y, Qinv)
     return _conv1x1_out(X, Y, mode)   # logdet always 0
 end
 
@@ -345,35 +332,36 @@ end
 
 ## Jacobian-related functions
 
+# Directional derivative of the reflector `I - 2vv'/(v'v)` with respect to `v`, in the
+# direction `dv`, with the leading `-2` left to the caller.
+function householder_differential(v::AbstractVector{T}, dv::AbstractVector{T}) where T
+    n = dot(v, v)
+    return (dv*adjoint(v) + v*adjoint(dv) - (2*dot(v, dv)/n)*(v*adjoint(v))) / n
+end
+
+# Both the map and its derivative are contractions of the batch against a `k x k` matrix that
+# does not depend on the sample, so the whole Householder algebra -- three reflectors, three
+# differentials and their products -- happens once per call. It used to be rebuilt from
+# scratch on every iteration of a loop over the batch, which cost `batchsize` times more than
+# the data movement it was wrapped around.
 function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter}, X::AbstractArray{T, N}, C::Conv1x1) where {T, N}
-    Y = cuzeros(X, size(X)...)
-    ΔY = cuzeros(ΔX, size(ΔX)...)
-    n_in = size(X, N-1)
+    v1, v2, v3 = C.v1.data, C.v2.data, C.v3.data
+    dv1, dv2, dv3 = Δθ[1].data, Δθ[2].data, Δθ[3].data
 
-    v1 = C.v1.data
-    v2 = C.v2.data
-    v3 = C.v3.data
-    dv1 = Δθ[1].data
-    dv2 = Δθ[2].data
-    dv3 = Δθ[3].data
+    Q = householder_matrix(v1, v2, v3)
+    Y = apply_channel_matrix(X, Q)
 
-    for i=1:size(X, N)
-        Xi = reshape(selectdim(X, N, i), :, n_in)
-        isa(X, CUDA.CuArray) && (Xi = CUDA.CuArray(Xi))
-        Yi = chain_lr(Xi, v1, v2, v3)
-        selectdim(Y, N, i) .= reshape(Yi, size(selectdim(Y, N, i) )...)
+    H1 = householder_reflector(v1)
+    H2 = householder_reflector(v2)
+    H3 = householder_reflector(v3)
+    dH1 = householder_differential(v1, dv1)
+    dH2 = householder_differential(v2, dv2)
+    dH3 = householder_differential(v3, dv3)
 
-        ΔXi = reshape(selectdim(ΔX, N, i), :, n_in)
-        ΔYi = chain_lr(Xi, v1, v2, v3)
-        # this is a lot of outer products of 1D vecotrs, need to be cleaned up that's overkill computationnaly
-        n1 = norm(v1); n2 = norm(v2); n3 = norm(v3);
-        c1 = I - 2f0*v1*v1'/n1^2f0; c2 = I - 2f0*v2*v2'/n2^2f0; c3 = I - 2f0*v3*v3'/n3^2f0;
-        ΔYi = chain_lr(ΔXi, v1, v2, v3)
-        ΔYi += -2f0*Xi*((dv1*v1'+v1*dv1'-2f0*dot(v1,dv1)*v1*v1'/n1^2f0)/n1^2f0*c2*c3+
-                       c1*(dv2*v2'+v2*dv2'-2f0*dot(v2,dv2)*v2*v2'/n2^2f0)/n2^2f0*c3+
-                       c1*c2*(dv3*v3'+v3*dv3'-2f0*dot(v3,dv3)*v3*v3'/n3^2f0)/n3^2f0)
-        selectdim(ΔY, N, i) .= reshape(ΔYi, size(selectdim(ΔY, N, i))...)
-    end
+    # d/dθ of `Q = H1*H2*H3`, by the product rule.
+    dQ = T(-2) .* (dH1*H2*H3 .+ H1*dH2*H3 .+ H1*H2*dH3)
+
+    ΔY = apply_channel_matrix(ΔX, Q) .+ apply_channel_matrix(X, dQ)
 
     return ΔY, Y
 end
