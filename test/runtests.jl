@@ -36,6 +36,7 @@ layers = ["test_layers/test_residual_block.jl",
           "test_layers/test_hyperbolic_layer.jl",
           "test_layers/test_actnorm.jl",
           "test_layers/test_bijector.jl",
+          "test_layers/test_spline.jl",
           "test_layers/test_layer_affine.jl"]
 
 networks = ["test_networks/test_invertible_chain.jl",

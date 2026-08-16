@@ -84,6 +84,8 @@ Y, logdet = AN.forward(X)
 - **CouplingLayerHINT**: Invertible recursive coupling layer HINT from Kruse et al. (2020) ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_hint.jl))
 - **CouplingLayerHyperbolic**: Invertible hyperbolic layer from Lensink et al. (2019) ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_hyperbolic.jl))
 - **CouplingLayerIRIM**: Invertible coupling layer from Putzky and Welling (2019) ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_irim.jl))
+- **CouplingLayerSpline**: Neural spline flow coupling layer from Durkan et al. (2019) — a monotonic spline in place of the affine transform, so one layer can fit a multi-modal conditional while keeping the analytic single-pass inverse. Supports monotonic rational-quadratic splines (`:rqs`), their periodic variant for angle-valued channels from Rezende et al. (2020) (`:circular`), and the linear rational splines of Dolatabadi et al. (2020) (`:lrs`), whose inverse needs no quadratic root ([example](https://github.com/slimgroup/InvertibleNetworks.jl/tree/master/examples/layers/layer_coupling_spline.jl))
+- **SplineLayer**: Elementwise monotonic spline over each channel, with free trainable knots — a strictly more flexible `ActNorm`, and the natural map for angles when built with `spline=:circular`
 - **SigmoidBijector / TanhBijector**: Elementwise bijectors between a bounded interval and the real line, for flows over bounded data
 
 ### Activation Functions

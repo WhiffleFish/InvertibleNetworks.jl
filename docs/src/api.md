@@ -31,6 +31,14 @@ Order  = [:type]
 Filter = t -> t<:NeuralNetLayer
 ```
 
+## Spline transforms
+
+```@autodocs
+Modules = [InvertibleNetworks]
+Order  = [:type, :function]
+Pages = ["splines.jl"]
+```
+
 ## Networks
 
 ```@autodocs

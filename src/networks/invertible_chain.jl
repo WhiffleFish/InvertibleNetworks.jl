@@ -178,7 +178,8 @@ end
 # Log-determinant of the inverse map, for the layers that can report it. Every layer that
 # contributes to the forward log-determinant recomputes its scaling on the inverse pass
 # anyway, so this is free; the generic fallback throws rather than silently dropping a term.
-_inverse_with_logdet(Z::AbstractArray, L::Union{ActNorm,Conv1x1,CouplingLayerGlow,AffineLayer,BoundedBijector}, mode) =
+_inverse_with_logdet(Z::AbstractArray, L::Union{ActNorm,Conv1x1,CouplingLayerGlow,AffineLayer,
+                                                BoundedBijector,CouplingLayerSpline,SplineLayer}, mode) =
     inverse(Z, L; logdet=_mode_kwarg(mode))
 _inverse_with_logdet(Z::AbstractArray, C::InvertibleChain, mode) =
     inverse(Z, C; logdet=_mode_kwarg(mode))
