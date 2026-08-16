@@ -305,7 +305,7 @@ end
 
 """
     f = log_likelihood_importance(X, A::AugmentedFlow; nsamples=8, μ=0f0, σ=1f0,
-                                  normalized=false)
+                                  normalized=false, base=nothing)
 
  Importance-weighted lower bound on `log p(X)` under an [`AugmentedFlow`](@ref), using
  `nsamples` independent draws of the auxiliary variable:
@@ -324,27 +324,30 @@ end
  See also: [`log_likelihood_importance_per_sample`](@ref), [`log_likelihood`](@ref)
 """
 function log_likelihood_importance(X::AbstractArray{T,N}, A::AugmentedFlow; nsamples::Int=8,
-                                   μ=T(0), σ=T(1), normalized::Bool=false) where {T,N}
-    f = log_likelihood_importance_per_sample(X, A; nsamples=nsamples, μ=μ, σ=σ,
+                                   μ=T(0), σ=T(1), normalized::Bool=false,
+                                   base=nothing) where {T,N}
+    f = log_likelihood_importance_per_sample(X, A; nsamples=nsamples, μ=μ, σ=σ, base=base,
                                              normalized=normalized)
     return sum(f)/size(X, N)
 end
 
 """
     f = log_likelihood_importance_per_sample(X, A::AugmentedFlow; nsamples=8, μ=0f0, σ=1f0,
-                                             normalized=false)
+                                             normalized=false, base=nothing)
 
  Per-sample form of [`log_likelihood_importance`](@ref): a vector of length `size(X, N)`
  holding the importance-weighted bound for each sample.
 """
 function log_likelihood_importance_per_sample(X::AbstractArray{T,N}, A::AugmentedFlow;
                                               nsamples::Int=8, μ=T(0), σ=T(1),
-                                              normalized::Bool=false) where {T,N}
+                                              normalized::Bool=false, base=nothing) where {T,N}
     nsamples > 0 || throw(ArgumentError("nsamples must be positive, got $nsamples"))
+    d = _latent_base(base, μ, σ, T)
+    check_latent_support(A, d)
     init!(A, X)
     scores = map(1:nsamples) do _
         Z, logdet = forward_per_sample(X, A)
-        log_likelihood_per_sample(Z; μ=μ, σ=σ, normalized=normalized) .+ logdet
+        logpdf_per_sample(d, Z; normalized=normalized) .+ logdet
     end
     return _logmeanexp(scores)
 end

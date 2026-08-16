@@ -12,6 +12,7 @@ timeit_include(path::AbstractString) = @timeit TIMEROUTPUT path include(path)
 const test_suite = get(ENV, "test_suite", "all") # "all", "basics", "layers" or "networks"
 
 basics = ["test_utils/test_objectives.jl",
+          "test_utils/test_latent_distributions.jl",
           "test_utils/test_sequential.jl",
           "test_utils/test_nnlib_convolution.jl",
           "test_utils/test_activations.jl", 

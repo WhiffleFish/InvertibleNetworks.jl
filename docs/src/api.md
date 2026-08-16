@@ -55,6 +55,18 @@ Order   = [:function]
 Pages = ["augmented_flow.jl"]
 ```
 
+## Latent distributions
+
+The base distribution a flow pushes forward is pluggable through the `base` keyword of every
+likelihood entry point. A base with bounded support additionally carries a domain invariant,
+checked against the network before any density is computed.
+
+```@autodocs
+Modules = [InvertibleNetworks]
+Order   = [:type, :function]
+Pages = ["latent_distributions.jl"]
+```
+
 ## AD Integration
 
 ```@autodocs

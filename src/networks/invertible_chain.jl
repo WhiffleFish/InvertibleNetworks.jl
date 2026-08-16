@@ -434,24 +434,29 @@ _correct_grads(Δθ, Δθ_offset, correction) =
 ## Log-likelihood of the data under a flow
 
 """
-    f = log_likelihood(X, net; μ=0f0, σ=1f0, normalized=false)
+    f = log_likelihood(X, net; μ=0f0, σ=1f0, normalized=false, base=nothing)
 
  Log-likelihood of the data `X` under the normalizing flow `net`, obtained by change of
  variables: for `Z, logdet = net.forward(X)`,
 
      log p_X(X) = log p_Z(Z) + log|det J|
 
- so this returns `log_likelihood(Z; μ=μ, σ=σ) + logdet`. Use `-log_likelihood(X, net)` as
+ so this returns `log_likelihood(Z; base=base) + logdet`. Use `-log_likelihood(X, net)` as
  the training objective; it is differentiable with Zygote/Flux, and the gradient accounts
  for the log-determinant term.
 
  `net` must accumulate a log-determinant, i.e. its layers must be built with `logdet=true`.
 
  Follows the same conventions as the latent-space [`log_likelihood`](@ref): the value is
- averaged over the batch, and by default the Gaussian normalizing constant is dropped, so
- the result is a log-density up to an additive constant. Pass `normalized=true` for a
- calibrated log-density -- with it, `exp` of this value integrates to 1 over the data space.
- The constant does not depend on the parameters, so it does not affect gradients.
+ averaged over the batch, and by default the normalizing constant is dropped, so the result
+ is a log-density up to an additive constant. Pass `normalized=true` for a calibrated
+ log-density -- with it, `exp` of this value integrates to 1 over the data space. The
+ constant does not depend on the parameters, so it does not affect gradients.
+
+ `base` selects the latent distribution and defaults to `StandardNormal(μ, σ)`. A base with
+ bounded support additionally requires `net` to be a bijection of that support, which is
+ checked here rather than left to produce quietly wrong numbers; see
+ [`check_latent_support`](@ref).
 
 # Example
 
@@ -464,24 +469,26 @@ l, grads = Flux.withgradient(m -> -log_likelihood(X, m), flow)
 Flux.update!(opt_state, flow, grads[1])
 ```
 
- See also: [`log_likelihood`](@ref), [`InvertibleChain`](@ref)
+ See also: [`log_likelihood`](@ref), [`LatentDistribution`](@ref), [`InvertibleChain`](@ref)
 """
 function log_likelihood(X::AbstractArray{T,N}, net::Invertible; μ=T(0), σ=T(1),
-                        normalized::Bool=false) where {T,N}
+                        normalized::Bool=false, base=nothing) where {T,N}
+    d = _latent_base(base, μ, σ, T)
+    check_latent_support(net, d)
     out = flow_forward(net, X, parameter_data(net))
-    return _flow_log_likelihood(out, μ, σ, normalized)
+    return _flow_log_likelihood(out, d, normalized)
 end
 
-_flow_log_likelihood(out::Tuple, μ, σ, normalized) =
-    log_likelihood(out[1]; μ=μ, σ=σ, normalized=normalized) + out[2]
+_flow_log_likelihood(out::Tuple, d, normalized) =
+    logpdf_mean(d, out[1]; normalized=normalized) + out[2]
 
-_flow_log_likelihood(::AbstractArray, μ, σ, normalized) = throw(ArgumentError(
+_flow_log_likelihood(::AbstractArray, d, normalized) = throw(ArgumentError(
     "log_likelihood(X, net) needs the change-of-variables term, but this network does not " *
     "accumulate a log-determinant; build its layers with logdet=true"))
 
 
 """
-    X, f = inverse_and_log_likelihood(Z, net; μ=0f0, σ=1f0, normalized=false)
+    X, f = inverse_and_log_likelihood(Z, net; μ=0f0, σ=1f0, normalized=false, base=nothing)
 
  Push the latent sample `Z` through `net.inverse` and return both the sample `X` and its
  log-likelihood under the flow, from a single pass:
@@ -493,26 +500,32 @@ _flow_log_likelihood(::AbstractArray, μ, σ, normalized) = throw(ArgumentError(
  separately costs a second pass through the network.
 
  The value follows the conventions of [`log_likelihood`](@ref): averaged over the batch,
- and up to an additive constant unless `normalized=true`.
+ and up to an additive constant unless `normalized=true`. `base` selects the latent
+ distribution, defaulting to `StandardNormal(μ, σ)`; draw `Z` from the same one with
+ `rand(base, dims...)`.
 
 # Example
 
 ```julia
-Z = randn(Float32, nx, ny, n, batchsize)
-X, logp = inverse_and_log_likelihood(Z, flow)
+base = StandardNormal()
+Z = rand(base, nx, ny, n, batchsize)
+X, logp = inverse_and_log_likelihood(Z, flow; base=base)
 ```
 
- See also: [`log_likelihood`](@ref), [`InvertibleChain`](@ref)
+ See also: [`log_likelihood`](@ref), [`LatentDistribution`](@ref), [`InvertibleChain`](@ref)
 """
 function inverse_and_log_likelihood(Z::AbstractArray{T,N}, net::Invertible; μ=T(0), σ=T(1),
-                                    normalized::Bool=false) where {T,N}
+                                    normalized::Bool=false, base=nothing) where {T,N}
+    d = _latent_base(base, μ, σ, T)
+    check_latent_support(net, d)
     X, logdet = _inverse_with_logdet_checked(Z, net, true)
-    return X, log_likelihood(Z; μ=μ, σ=σ, normalized=normalized) - logdet
+    return X, logpdf_mean(d, Z; normalized=normalized) - logdet
 end
 
 
 """
-    X, f = inverse_and_log_likelihood_per_sample(Z, net; μ=0f0, σ=1f0, normalized=false)
+    X, f = inverse_and_log_likelihood_per_sample(Z, net; μ=0f0, σ=1f0, normalized=false,
+                                                 base=nothing)
 
  Per-sample form of [`inverse_and_log_likelihood`](@ref): `f` is a vector of length
  `size(Z, N)` holding the log-likelihood of each generated sample.
@@ -523,10 +536,12 @@ end
  See also: [`inverse_and_log_likelihood`](@ref), [`log_likelihood_per_sample`](@ref)
 """
 function inverse_and_log_likelihood_per_sample(Z::AbstractArray{T,N}, net::Invertible;
-                                               μ=T(0), σ=T(1),
-                                               normalized::Bool=false) where {T,N}
+                                               μ=T(0), σ=T(1), normalized::Bool=false,
+                                               base=nothing) where {T,N}
+    d = _latent_base(base, μ, σ, T)
+    check_latent_support(net, d)
     X, logdet = _inverse_with_logdet_checked(Z, net, :sample)
-    return X, log_likelihood_per_sample(Z; μ=μ, σ=σ, normalized=normalized) .- logdet
+    return X, logpdf_per_sample(d, Z; normalized=normalized) .- logdet
 end
 
 function _inverse_with_logdet_checked(Z::AbstractArray, net::Invertible, mode)
@@ -539,7 +554,7 @@ end
 
 
 """
-    f = log_likelihood_per_sample(X, net; μ=0f0, σ=1f0, normalized=false)
+    f = log_likelihood_per_sample(X, net; μ=0f0, σ=1f0, normalized=false, base=nothing)
 
  Log-likelihood of each sample of `X` under the normalizing flow `net`, returned as a vector
  of length `size(X, N)`. This is the unaggregated form of [`log_likelihood`](@ref)`(X, net)`:
@@ -558,6 +573,10 @@ end
  A full-batch forward pass is run first so that lazily-initialized layers (`ActNorm`) take
  their statistics from the whole batch rather than from a single sample.
 
+ `base` selects the latent distribution and defaults to `StandardNormal(μ, σ)`, on the same
+ terms as [`log_likelihood`](@ref)`(X, net)` -- including the support check a bounded base
+ brings with it.
+
 # Example
 
 ```julia
@@ -568,26 +587,28 @@ outliers = findall(<(quantile(scores, 0.05)), scores)
  See also: [`log_likelihood`](@ref), [`log_likelihood_per_sample`](@ref)
 """
 function log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible; μ=T(0), σ=T(1),
-                                  normalized::Bool=false) where {T,N}
+                                  normalized::Bool=false, base=nothing) where {T,N}
+    d = _latent_base(base, μ, σ, T)
+    check_latent_support(net, d)
     # Initialize lazily-initialized layers from the whole batch. Hidden from AD: it is a
     # setup side effect, and tracing the hand-written forward directly (rather than through
     # the `flow_forward` rule) would hit its in-place updates.
     init!(net, X)
-    return _log_likelihood_per_sample(X, net, Val(supports_per_sample_logdet(net)); μ=μ, σ=σ,
-                                      normalized=normalized)
+    return _log_likelihood_per_sample(X, net, Val(supports_per_sample_logdet(net)), d,
+                                      normalized)
 end
 
-function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Val{true};
-                                    μ=T(0), σ=T(1), normalized::Bool=false) where {T,N}
+function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Val{true},
+                                    d, normalized::Bool) where {T,N}
     Z, logdet = flow_forward_per_sample(net, X, parameter_data(net))
-    return log_likelihood_per_sample(Z; μ=μ, σ=σ, normalized=normalized) .+ logdet
+    return logpdf_per_sample(d, Z; normalized=normalized) .+ logdet
 end
 
 # One pass per sample, for networks whose layers only report a batch-averaged
 # log-determinant.
-function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Val{false};
-                                    μ=T(0), σ=T(1), normalized::Bool=false) where {T,N}
+function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Val{false},
+                                    d, normalized::Bool) where {T,N}
     colons = ntuple(_ -> Colon(), Val(N-1))
-    return [log_likelihood(X[colons..., i:i], net; μ=μ, σ=σ, normalized=normalized)
+    return [log_likelihood(X[colons..., i:i], net; base=d, normalized=normalized)
             for i in axes(X, N)]
 end

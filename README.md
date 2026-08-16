@@ -101,6 +101,7 @@ Y, logdet = AN.forward(X)
 
 - **Jacobian Computation**: Hand-derived Jacobians for memory efficiency
 - **Per-sample scoring**: `log_likelihood_per_sample`, `forward_per_sample` and `inverse_and_log_likelihood_per_sample` return one log-density per sample from a single batched pass, differentiable with per-example weights
+- **Pluggable base distributions**: every likelihood entry point takes `base=`, a `LatentDistribution` — `StandardNormal` (the default) or `BoxUniform`, uniform on `[-B, B]ᵈ`. Pairing `BoxUniform(B)` with spline layers built `mix=false` gives a flow that is a bijection *of the box*, so an `identity_init` model is exactly uniform and the density integrates to 1 at every parameter value, with no squashing layer. A bounded base carries its support with it: a network that is not a bijection of that box (`ActNorm`, `Conv1x1`, `CouplingLayerGlow`, `mix=true`, or a spline whose own bound is wider) is rejected with an error naming the offending layers, rather than quietly returning a wrong density
 - **Dimensionality Manipulation**: squeeze/unsqueeze (column, patch, checkerboard), split/cat
 - **Wavelet Transform**
 

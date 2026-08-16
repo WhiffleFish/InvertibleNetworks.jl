@@ -144,6 +144,10 @@ include("networks/invertible_chain.jl")
 # (needs the chain's `flow_forward`/`forward_per_sample` AD entry points)
 include("networks/augmented_flow.jl")
 
+# Pluggable base distributions and the domain invariant they carry
+# (last, so that the `preserves_box` methods can name every layer and network type)
+include("utils/latent_distributions.jl")
+
 # Jacobians
 include("utils/jacobian.jl")
 

@@ -45,37 +45,42 @@ end
 # Log-likelihood
 
 """
-    f = log_likelihood(X; μ=T(0), σ=T(1), normalized=false)
+    f = log_likelihood(X; μ=T(0), σ=T(1), normalized=false, base=nothing)
 
-Log-likelihood of X for a Gaussian distribution with given mean μ and variance
-σ. All elements of X are assumed to be iid. The value is averaged over the batch
-(the trailing dimension of X).
+Log-likelihood of X under the latent distribution `base`, averaged over the batch (the
+trailing dimension of X).
 
-By default the Gaussian normalizing constant is dropped, so the result is a log-density
-up to an additive constant -- enough for optimization, since the constant does not depend
-on the model. Pass `normalized=true` to include `-d/2*log(2πσ²)`, where `d` is the number
-of elements per sample, and get a calibrated log-density.
+The default base is `StandardNormal(μ, σ)`: a Gaussian with the given mean and standard
+deviation, all elements of X assumed iid. Pass a [`LatentDistribution`](@ref) as `base` for
+any other family -- `base=BoxUniform(3f0)` for a uniform on `[-3, 3]ᵈ`, say. `μ`/`σ` are the
+Gaussian-only shorthand and cannot be combined with an explicit `base`.
 
-See also: [`∇log_likelihood`](@ref), [`gaussian_lognorm`](@ref)
+By default the normalizing constant is dropped, so the result is a log-density up to an
+additive constant -- enough for optimization, since the constant does not depend on the
+model. Pass `normalized=true` to include it (`-d/2*log(2πσ²)` for the Gaussian, where `d` is
+the number of elements per sample) and get a calibrated log-density.
+
+See also: [`∇log_likelihood`](@ref), [`gaussian_lognorm`](@ref), [`LatentDistribution`](@ref)
 """
-log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1), normalized::Bool=false) where {T, N} =
-    T(1/size(X, N))*sum(-T(.5)*((X .- μ)/σ).^2) + (normalized ? gaussian_lognorm(X, σ) : zero(T))
+log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1), normalized::Bool=false,
+               base=nothing) where {T, N} =
+    logpdf_mean(_latent_base(base, μ, σ, T), X; normalized=normalized)
 
 
 """
-    f = log_likelihood_per_sample(X; μ=T(0), σ=T(1), normalized=false)
+    f = log_likelihood_per_sample(X; μ=T(0), σ=T(1), normalized=false, base=nothing)
 
-Gaussian log-likelihood of each sample in the batched array `X`, returned as a vector of
-length `size(X, N)`. This is the unaggregated form of [`log_likelihood`](@ref):
-`sum(log_likelihood_per_sample(X))/size(X, N) == log_likelihood(X)`.
+Log-likelihood of each sample in the batched array `X` under the latent distribution `base`,
+returned as a vector of length `size(X, N)`. This is the unaggregated form of
+[`log_likelihood`](@ref): `sum(log_likelihood_per_sample(X))/size(X, N) == log_likelihood(X)`.
 
-See also: [`log_likelihood`](@ref)
+As for [`log_likelihood`](@ref), the base defaults to `StandardNormal(μ, σ)`.
+
+See also: [`log_likelihood`](@ref), [`LatentDistribution`](@ref)
 """
-function log_likelihood_per_sample(X::AbstractArray{T, N}; μ=T(0), σ=T(1),
-                                  normalized::Bool=false) where {T, N}
-    f = per_sample_sum(-T(.5)*((X .- μ)/σ).^2)
-    return normalized ? f .+ gaussian_lognorm(X, σ) : f
-end
+log_likelihood_per_sample(X::AbstractArray{T, N}; μ=T(0), σ=T(1), normalized::Bool=false,
+                          base=nothing) where {T, N} =
+    logpdf_per_sample(_latent_base(base, μ, σ, T), X; normalized=normalized)
 
 
 ###################################################################################################
@@ -178,26 +183,38 @@ end
 
 
 """
-    ∇f = ∇log_likelihood(X; μ=T(0), σ=T(1))
+    ∇f = ∇log_likelihood(X; μ=T(0), σ=T(1), base=nothing)
 
 Gradient of the Gaussian log-likelihood function with respect to the input
 tensor X.
 
+This is a closed form specific to a Gaussian base: `base` is accepted so that a call site
+threading one through keeps working, but anything other than a [`StandardNormal`](@ref)
+raises. Differentiate [`log_likelihood`](@ref) with Zygote for the general case -- the AD
+path does not use this function.
+
 See also: [`log_likelihood`](@ref)
 """
-∇log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1)) where {T, N} = T(-1/size(X, N))*(X .- μ)/σ^2
+function ∇log_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1), base=nothing) where {T, N}
+    d = _gaussian_base(base, μ, σ, T)
+    return T(-1/size(X, N))*(X .- T(d.μ))/T(d.σ)^2
+end
 
 
 """
-    Hf = Hlog_likelihood(X; μ=T(0), σ=T(1))
+    Hf = Hlog_likelihood(X; μ=T(0), σ=T(1), base=nothing)
 
 Hessian of the Gaussian log-likelihood function with respect to the input
 tensor X.
 
+Gaussian-specific, on the same terms as [`∇log_likelihood`](@ref).
+
 See also: [`log_likelihood`](@ref)
 """
-function Hlog_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1)) where {T, N}
+function Hlog_likelihood(X::AbstractArray{T, N}; μ=T(0), σ=T(1), base=nothing) where {T, N}
+    d = _gaussian_base(base, μ, σ, T)
+    σ² = T(d.σ)^2
     return InvertibleNetworkLinearOperator{AbstractArray{T, N},AbstractArray{T, N}}(
-        ΔX -> -T(1/size(X, N))*ΔX/σ^2,
-        ΔX -> -T(1/size(X, N))*ΔX/σ^2)
+        ΔX -> -T(1/size(X, N))*ΔX/σ²,
+        ΔX -> -T(1/size(X, N))*ΔX/σ²)
 end
