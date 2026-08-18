@@ -83,6 +83,10 @@ or
    other way round. Alternating `swap` down a stack is how every channel gets transformed when
    `mix=false`
 
+ - `n_ctx`: number of extra channels the conditioner reads from a *context* tensor supplied at
+   call time, as `forward(X, C, CL)`. `0`, the default, is the unconditional layer. See
+   *Conditioning* below
+
  - `k1`, `k2`, `p1`, `p2`, `s1`, `s2`, `ndims`, `nx`, `dense`, `freeze_conv`: as for
    [`CouplingLayerGlow`](@ref)
 
@@ -106,6 +110,34 @@ or
 
  - Per sample: pass `logdet=:sample` to either direction
 
+ - Conditional (`n_ctx > 0`): `forward(X, C, CL)`, `inverse(Y, C, CL)`, and
+   `ΔX, ΔC, X = backward(ΔY, Y, C, CL)`, with `C` of `n_ctx` channels and the same batch size
+   as `X`
+
+ *Conditioning.* With `n_ctx > 0` the context is concatenated onto the channels the residual
+ block reads, so it reaches only the *conditioner* and never the channels the spline
+ transforms. Three consequences, and they are why this is the cheap way to condition a spline
+ flow rather than merely a convenient one:
+
+ 1. The layer is still a bijection in `X` at every fixed context, and its inverse is still one
+    analytic pass. Nothing about the spline maths changes; only where its knots came from.
+ 2. [`preserves_box`](@ref) needs no new case. An RQS with linear tails is a bijection of
+    `[-B, B]` for *any* admissible knots, and it is the spline parameterization -- softmax
+    widths and heights, positive derivatives -- that keeps them admissible, not their source.
+    Conditioning picks a different bijection of the box per context; every one is still a
+    bijection of the box.
+ 3. `identity_init` still gives the exact identity, for every context. It zeroes the
+    conditioner's output convolution, and a zeroed output emits zero whatever its input width.
+    So an identity-initialized box-native stack is still *exactly* uniform on the box at every
+    state, which is what makes it usable as the fixed point of a KL-regularized objective.
+
+ One consequence of (3) worth knowing before it is mistaken for a bug: at initialization the
+ cotangent this layer reports for `C` is exactly zero, because the same zeroed convolution that
+ makes the map the identity also zeroes the gradient flowing back through it (`ΔX3 =
+ conv(ΔY3, W3)` with `W3 = 0`). The conditioner's *own* gradient is nonzero, so `W3` moves on
+ the first optimizer step and the context pathway starts learning on the second. It is one
+ step, not a stall.
+
  *Trainable parameters:*
 
  - None in `CL` itself; the parameters live in the residual block `CL.RB` and, when present, the
@@ -120,29 +152,34 @@ struct CouplingLayerSpline{C<:Union{Conv1x1,Nothing},R<:Union{ResidualBlock,Flux
     spline::S
     logdet::Bool
     swap::Bool
+    # Context channels the conditioner reads on top of the pass-through half; 0 = unconditional.
+    # A plain field rather than a type parameter: it is only ever read to validate the context's
+    # width, never to choose a code path -- the conditional and unconditional passes are
+    # separate methods, dispatched on whether a context was given at all.
+    n_ctx::Int
 end
 
-CouplingLayerSpline(C::CT, RB::RT, spec::ST, logdet::Bool, swap::Bool) where
+CouplingLayerSpline(C::CT, RB::RT, spec::ST, logdet::Bool, swap::Bool, n_ctx::Int=0) where
     {CT<:Union{Conv1x1,Nothing},RT<:Union{ResidualBlock,FluxBlock},ST<:SplineSpec} =
-    CouplingLayerSpline{CT,RT,ST,logdet}(C, RB, spec, logdet, swap)
+    CouplingLayerSpline{CT,RT,ST,logdet}(C, RB, spec, logdet, swap, n_ctx)
 
 Flux.@layer CouplingLayerSpline
 
 supports_per_sample_logdet(::CouplingLayerSpline) = true
 
 Base.show(io::IO, L::CouplingLayerSpline) =
-    print(io, "CouplingLayerSpline($(L.spline)$(isnothing(L.C) ? ", mix=false" : "")$(L.swap ? ", swap=true" : ""))")
+    print(io, "CouplingLayerSpline($(L.spline)$(isnothing(L.C) ? ", mix=false" : "")$(L.swap ? ", swap=true" : "")$(iszero(L.n_ctx) ? "" : ", n_ctx=$(L.n_ctx)"))")
 
 # Constructor from an existing convolution, conditioner and spline shape.
 CouplingLayerSpline(C::Union{Conv1x1,Nothing}, RB::Union{ResidualBlock,FluxBlock},
-                    spec::SplineSpec; logdet=false, swap=false) =
-    CouplingLayerSpline(C, RB, spec, logdet, swap)
+                    spec::SplineSpec; logdet=false, swap=false, n_ctx::Int=0) =
+    CouplingLayerSpline(C, RB, spec, logdet, swap, n_ctx)
 
 # Constructor from input dimensions
 function CouplingLayerSpline(n_in::Int64, n_hidden::Int64; spline=:rqs, nbins=8, bound=3f0,
                              min_bin_width=1f-3, min_bin_height=1f-3, min_derivative=1f-3,
                              min_lambda=1f-3, identity_init::Bool=true, zero_init=nothing,
-                             mix=nothing, swap::Bool=false,
+                             mix=nothing, swap::Bool=false, n_ctx::Int=0,
                              nx=nothing, dense=false, freeze_conv=false,
                              k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, ndims=2)
 
@@ -165,16 +202,19 @@ function CouplingLayerSpline(n_in::Int64, n_hidden::Int64; spline=:rqs, nbins=8,
         "preserve, so `mix=true` would leave the layer non-invertible; use mix=false and " *
         "alternate `swap` between layers instead"))
 
+    n_ctx >= 0 || throw(ArgumentError("n_ctx must be non-negative, got n_ctx = $n_ctx"))
+
     split_num = Int(round(n_in/2))
     n_trans   = swap ? n_in - split_num : split_num       # channels the spline transforms
     n_cond    = n_in - n_trans                            # channels the conditioner reads
+    n_read    = n_cond + n_ctx                            # ... plus the context, when there is one
     out_chan  = n_trans * n_spline_params(spec)
 
     if dense
         isnothing(nx) && error("Dense network needs nx as kwarg input")
         init = zi ? Flux.zeros32 : Flux.glorot_uniform
-        RB = FluxBlock(Chain(x -> reshape(x, nx*n_cond, :),
-                             Dense(nx*n_cond, n_in*n_hidden, relu),
+        RB = FluxBlock(Chain(x -> reshape(x, nx*n_read, :),
+                             Dense(nx*n_read, n_in*n_hidden, relu),
                              Dense(n_in*n_hidden, n_in*n_hidden, relu),
                              Dense(n_in*n_hidden, nx*out_chan; init=init),
                              x -> reshape(x, nx, out_chan, :)))
@@ -184,13 +224,13 @@ function CouplingLayerSpline(n_in::Int64, n_hidden::Int64; spline=:rqs, nbins=8,
         # conditioner could never emit a negative parameter, which would pin every knot
         # derivative at or above 1 and throw away most of what a spline is for. The gate halves
         # the channel count, hence the doubled `n_out`.
-        RB = ResidualBlock(n_cond, n_hidden; n_out=2*out_chan, k1=k1, k2=k2, p1=p1, p2=p2,
+        RB = ResidualBlock(n_read, n_hidden; n_out=2*out_chan, k1=k1, k2=k2, p1=p1, p2=p2,
                            s1=s1, s2=s2, fan=false, ndims=ndims)
         zi && fill!(RB.W3.data, 0)
     end
 
     return CouplingLayerSpline(domix ? Conv1x1(n_in; freeze=freeze_conv) : nothing,
-                               RB, spec, logdet, swap)
+                               RB, spec, logdet, swap, n_ctx)
 end
 
 CouplingLayerSpline3D(args...; kw...) = CouplingLayerSpline(args...; kw..., ndims=3)
@@ -210,6 +250,34 @@ CouplingLayerSpline3D(args...; kw...) = CouplingLayerSpline(args...; kw..., ndim
 @inline _mix_grad(ΔX, X, C::Conv1x1; set_grad::Bool=true) =
     inverse_grad(ΔX, X, C; set_grad=set_grad)
 
+# The conditioner's input, and the split that undoes it on the way back.
+#
+# `nothing` is the unconditional case and is what the two-argument entry points pass, so both
+# passes share one implementation. It is a compile-time distinction -- `Nothing` against
+# `AbstractArray` -- so the unconditional path keeps exactly the code it had.
+@inline _cond_input(Xc, ::Nothing) = Xc
+@inline _cond_input(Xc, Ctx::AbstractArray) = tensor_cat(Xc, Ctx)
+
+@inline _cond_split(ΔXin, Xc, ::Nothing) = (ΔXin, nothing)
+@inline _cond_split(ΔXin::AbstractArray{T,N}, Xc, ::AbstractArray) where {T,N} =
+    tensor_split(ΔXin; split_index=size(Xc, max(1, N - 1)))
+
+# Unconditional callers get back exactly the pair they always did.
+@inline _cond_out(ΔX, ::Nothing, X) = (ΔX, X)
+@inline _cond_out(ΔX, ΔCtx, X) = (ΔX, ΔCtx, X)
+
+# The context's width is checked rather than inferred: a mismatch would otherwise surface as a
+# convolution shape error from inside the residual block, several frames away from the cause.
+@inline _check_ctx(::CouplingLayerSpline, ::Nothing) = nothing
+@inline function _check_ctx(L::CouplingLayerSpline, Ctx::AbstractArray{T,N}) where {T,N}
+    n = size(Ctx, max(1, N - 1))
+    n == L.n_ctx || throw(DimensionMismatch(
+        "this CouplingLayerSpline was built with n_ctx = $(L.n_ctx) but was given a context " *
+        "of $n channels" *
+        (iszero(L.n_ctx) ? "; build it with n_ctx = $n to condition it" : "")))
+    return nothing
+end
+
 # Which half the spline transforms, and how the two halves go back together.
 @inline function _couple_split(X, swap::Bool)
     A, B = tensor_split(X)
@@ -219,12 +287,19 @@ end
 
 # Forward pass: Input X, Output Y
 forward(X::AbstractArray{T,N}, L::CouplingLayerSpline{C,R,S,LD}; logdet=nothing) where {T,N,C,R,S,LD} =
-    _forward(X, L, logdet_mode(logdet, Val(LD)))
+    _forward(X, nothing, L, logdet_mode(logdet, Val(LD)))
 
-function _forward(X::AbstractArray{T,N}, L::CouplingLayerSpline, mode::Val) where {T,N}
+# Conditional forward: `Ctx` is `n_ctx` channels wide with the same batch size as `X`.
+forward(X::AbstractArray{T,N}, Ctx::AbstractArray{T,N},
+        L::CouplingLayerSpline{C,R,S,LD}; logdet=nothing) where {T,N,C,R,S,LD} =
+    _forward(X, Ctx, L, logdet_mode(logdet, Val(LD)))
+
+function _forward(X::AbstractArray{T,N}, Ctx, L::CouplingLayerSpline, mode::Val) where {T,N}
+    _check_ctx(L, Ctx)
     Xt, Xc = _couple_split(_mix_forward(X, L.C), L.swap)
 
-    kn = spline_knots(_spline_params(block_forward(Xc, L.RB), Xt, L.spline), L.spline, Val(N))
+    kn = spline_knots(_spline_params(block_forward(_cond_input(Xc, Ctx), L.RB), Xt, L.spline),
+                      L.spline, Val(N))
     y, lg = spline_forward(_widen(Xt), kn, L.spline, Val(N))
 
     # The conditioning half passes through unchanged, and `tensor_cat` copies it anyway.
@@ -236,23 +311,51 @@ end
 # The conditioner reads the untransformed half, so it gives the same knots in both directions and
 # the spline inverts in a single pass. `logdet` defaults to `false` rather than to `L.logdet` so
 # that the internal call in `backward` keeps its return shape.
-function inverse(Y::AbstractArray{T,N}, L::CouplingLayerSpline; logdet=false) where {T,N}
+inverse(Y::AbstractArray{T,N}, L::CouplingLayerSpline; logdet=false) where {T,N} =
+    _inverse(Y, nothing, L, logdet_mode(logdet))
+
+inverse(Y::AbstractArray{T,N}, Ctx::AbstractArray{T,N}, L::CouplingLayerSpline;
+        logdet=false) where {T,N} =
+    _inverse(Y, Ctx, L, logdet_mode(logdet))
+
+function _inverse(Y::AbstractArray{T,N}, Ctx, L::CouplingLayerSpline, mode::Val) where {T,N}
+    _check_ctx(L, Ctx)
     Yt, Xc = _couple_split(Y, L.swap)
-    kn = spline_knots(_spline_params(block_forward(Xc, L.RB), Yt, L.spline), L.spline, Val(N))
+    kn = spline_knots(_spline_params(block_forward(_cond_input(Xc, Ctx), L.RB), Yt, L.spline),
+                      L.spline, Val(N))
     x, lg = spline_inverse(_widen(Yt), kn, L.spline, Val(N))
     X = _mix_inverse(_couple_cat(_narrow(x, size(Yt)), Xc, L.swap), L.C)
-    return _spline_inv_out(X, lg, logdet_mode(logdet))
+    return _spline_inv_out(X, lg, mode)
 end
 
 # Backward pass: Input (ΔY, Y), Output (ΔX, X)
-function backward(ΔY::AbstractArray{T,N}, Y::AbstractArray{T,N}, L::CouplingLayerSpline;
-                  set_grad::Bool=true, logdet_weight=nothing) where {T,N}
+backward(ΔY::AbstractArray{T,N}, Y::AbstractArray{T,N}, L::CouplingLayerSpline;
+         set_grad::Bool=true, logdet_weight=nothing) where {T,N} =
+    _backward(ΔY, Y, nothing, L, set_grad, logdet_weight)
+
+# Conditional backward: Input (ΔY, Y, Ctx), Output (ΔX, ΔCtx, X).
+#
+# `set_grad=true` only. The Jacobian interface reports the log-determinant's parameter gradient
+# separately and has no conditional form here; `InvertibleChain` already refuses `set_grad=false`
+# for the same reason, so nothing that reaches this layer through a chain can ask for it.
+function backward(ΔY::AbstractArray{T,N}, Y::AbstractArray{T,N}, Ctx::AbstractArray{T,N},
+                  L::CouplingLayerSpline; set_grad::Bool=true, logdet_weight=nothing) where {T,N}
+    set_grad || throw(ArgumentError(
+        "conditional backward is implemented with set_grad=true only; drop the context for " *
+        "the Jacobian interface"))
+    return _backward(ΔY, Y, Ctx, L, true, logdet_weight)
+end
+
+function _backward(ΔY::AbstractArray{T,N}, Y::AbstractArray{T,N}, Ctx,
+                   L::CouplingLayerSpline, set_grad::Bool, logdet_weight) where {T,N}
     check_logdet_weight(logdet_weight, set_grad)
+    _check_ctx(L, Ctx)
 
     # Recompute the forward state, keeping the residual block's own intermediates: its backward
     # pass below would otherwise run its forward a second time.
     Yt, Xc = _couple_split(Y, L.swap)
-    rb = block_forward_save(Xc, L.RB)
+    Xin = _cond_input(Xc, Ctx)
+    rb = block_forward_save(Xin, L.RB)
     kn = spline_knots(_spline_params(block_output(rb), Yt, L.spline), L.spline, Val(N))
 
     x, _ = spline_inverse(_widen(Yt), kn, L.spline, Val(N))
@@ -267,11 +370,14 @@ function backward(ΔY::AbstractArray{T,N}, Y::AbstractArray{T,N}, L::CouplingLay
     Δθf = _narrow(Δθ, size(block_output(rb)))
 
     if set_grad
-        ΔXc = block_backward(Δθf, Xc, rb, L.RB) .+ ΔYc
-        return _mix_grad(_couple_cat(ΔXt, ΔXc, L.swap), X, L.C), X
+        # `block_backward` returns the cotangent of the conditioner's whole input, so the
+        # context's share of it is one split -- the context needs no separate backward pass.
+        ΔXc, ΔCtx = _cond_split(block_backward(Δθf, Xin, rb, L.RB), Xc, Ctx)
+        ΔXc = ΔXc .+ ΔYc
+        return _cond_out(_mix_grad(_couple_cat(ΔXt, ΔXc, L.swap), X, L.C), ΔCtx, X)
     end
 
-    ΔXc, Δθrb = block_backward(Δθf, Xc, rb, L.RB; set_grad=false)
+    ΔXc, Δθrb = block_backward(Δθf, Xin, rb, L.RB; set_grad=false)
     ΔXc = ΔXc .+ ΔYc
     ΔX, Δθc = _mix_grad(_couple_cat(ΔXt, ΔXc, L.swap), X, L.C; set_grad=false)
     Δθ_all = cat(Δθc, Δθrb; dims=1)
@@ -281,7 +387,7 @@ function backward(ΔY::AbstractArray{T,N}, Y::AbstractArray{T,N}, L::CouplingLay
     # unweighted and with the sign of `+logdet`. Both passes reuse `rb`, so the conditioner's
     # forward pass is paid for once.
     _, Δθl = spline_vjp(zero(T), one(T)/size(Y, N), x, kn, L.spline, Val(N))
-    _, ∇logdet = block_backward(_narrow(Δθl, size(block_output(rb))), Xc, rb, L.RB;
+    _, ∇logdet = block_backward(_narrow(Δθl, size(block_output(rb))), Xin, rb, L.RB;
                                 set_grad=false)
     return ΔX, Δθ_all, X, cat(0 .* Δθc, ∇logdet; dims=1)
 end
