@@ -127,15 +127,36 @@ function _check_per_sample_logdet(C::InvertibleChain)
         "cannot report it per sample, so this chain has no per-sample log-determinant"))
 end
 
+# Conditioning
+#
+# One context tensor is shared by every layer: `nothing` is the unconditional chain, and it is
+# what the two-argument entry points pass, so both share one set of recursions. The two levels
+# of dispatch below are both on TYPES -- `Nothing` against `AbstractArray`, then the layer's own
+# type -- so the unconditional path compiles to what it compiled to before, and a conditional
+# chain has no runtime branch either.
+#
+# A layer with no conditioner ignores the context. That is what lets a conditional chain hold an
+# `ActNorm` or a `SplineLayer` unchanged, which matters because those are the layers a spline
+# stack is normally interleaved with.
+@inline _consumes_context(::Any) = false
+@inline _consumes_context(L::CouplingLayerSpline) = L.n_ctx > 0
+
+@inline _ctx_forward(X, ::Nothing, layer, mode) = _forward_step(X, layer, mode)
+@inline _ctx_forward(X, Ctx::AbstractArray, layer, mode) = _forward_step(X, layer, mode)
+@inline _ctx_forward(X, Ctx::AbstractArray, layer::CouplingLayerSpline, ::Val{true}) =
+    forward(X, Ctx, layer)
+@inline _ctx_forward(X, Ctx::AbstractArray, layer::CouplingLayerSpline, ::Val{:sample}) =
+    contributes_logdet(layer) ? forward(X, Ctx, layer; logdet=:sample) : forward(X, Ctx, layer)
+
 # Recursion over the layer tuple: unrolled by the compiler, so no runtime tuple indexing.
 @inline _forward_step(X, layer, ::Val{true}) = forward(X, layer)
 @inline _forward_step(X, layer, mode::Val{:sample}) =
     contributes_logdet(layer) ? forward(X, layer; logdet=:sample) : forward(X, layer)
 
-_apply_forward(X, logdet, ::Tuple{}, ::Val) = (X, logdet)
-function _apply_forward(X, logdet, layers::Tuple, mode::Val)
-    Y, Δlogdet = _step_out(_forward_step(X, first(layers), mode))
-    return _apply_forward(Y, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers), mode)
+_apply_forward(X, Ctx, logdet, ::Tuple{}, ::Val) = (X, logdet)
+function _apply_forward(X, Ctx, logdet, layers::Tuple, mode::Val)
+    Y, Δlogdet = _step_out(_ctx_forward(X, Ctx, first(layers), mode))
+    return _apply_forward(Y, Ctx, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers), mode)
 end
 
 """
@@ -151,10 +172,14 @@ end
  layer's scaling, and only the reduction over the batch dimension destroys it.
 """
 forward(X::AbstractArray{T,N}, C::InvertibleChain{L,LD}; logdet=nothing) where {T,N,L,LD} =
-    _chain_forward(X, C, logdet_mode(logdet, Val(LD)))
+    _chain_forward(X, nothing, C, logdet_mode(logdet, Val(LD)))
 
-_chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T,N} =
-    _apply_forward(X, zero(T), C.layers, Val(true))[1]
+forward(X::AbstractArray{T,N}, Ctx::AbstractArray{T,N}, C::InvertibleChain{L,LD};
+        logdet=nothing) where {T,N,L,LD} =
+    _chain_forward(X, Ctx, C, logdet_mode(logdet, Val(LD)))
+
+_chain_forward(X::AbstractArray{T,N}, Ctx, C::InvertibleChain, ::Val{false}) where {T,N} =
+    _apply_forward(X, Ctx, zero(T), C.layers, Val(true))[1]
 
 # The batch-averaged scalar, accumulated per sample and reduced once at the end.
 #
@@ -166,28 +191,33 @@ _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T
 #
 # A chain containing a layer that can only report a batch average falls back to the original
 # per-layer accumulation. Both branches return `(Z, ::T)`, so the choice costs no inference.
-function _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N}
+function _chain_forward(X::AbstractArray{T,N}, Ctx, C::InvertibleChain, ::Val{true}) where {T,N}
     if supports_per_sample_logdet(C)
-        Z, v = _apply_forward(X, constant_per_sample(X, zero(T)), C.layers, Val(:sample))
+        Z, v = _apply_forward(X, Ctx, constant_per_sample(X, zero(T)), C.layers, Val(:sample))
         return Z, sum(v)/T(size(X, N))
     end
-    return _apply_forward(X, zero(T), C.layers, Val(true))
+    return _apply_forward(X, Ctx, zero(T), C.layers, Val(true))
 end
 
-function _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, mode::Val{:sample}) where {T,N}
+function _chain_forward(X::AbstractArray{T,N}, Ctx, C::InvertibleChain,
+                        mode::Val{:sample}) where {T,N}
     _check_accumulates_logdet(C)
     _check_per_sample_logdet(C)
-    return _apply_forward(X, constant_per_sample(X, zero(T)), C.layers, mode)
+    return _apply_forward(X, Ctx, constant_per_sample(X, zero(T)), C.layers, mode)
 end
 
 _check_accumulates_logdet(C::InvertibleChain) = C.logdet || throw(ArgumentError(
     "this network does not accumulate a log-determinant, so there is none to report; " *
     "build its layers with logdet=true"))
 
-_apply_inverse(Z, ::Tuple{}) = Z
-function _apply_inverse(Z, layers::Tuple)
-    X, _ = _step_out(inverse(Z, first(layers)))
-    return _apply_inverse(X, Base.tail(layers))
+@inline _ctx_inverse(Z, ::Nothing, layer) = inverse(Z, layer)
+@inline _ctx_inverse(Z, Ctx::AbstractArray, layer) = inverse(Z, layer)
+@inline _ctx_inverse(Z, Ctx::AbstractArray, layer::CouplingLayerSpline) = inverse(Z, Ctx, layer)
+
+_apply_inverse(Z, Ctx, ::Tuple{}) = Z
+function _apply_inverse(Z, Ctx, layers::Tuple)
+    X, _ = _step_out(_ctx_inverse(Z, Ctx, first(layers)))
+    return _apply_inverse(X, Ctx, Base.tail(layers))
 end
 
 # Log-determinant of the inverse map, for the layers that can report it. Every layer that
@@ -207,15 +237,21 @@ _inverse_with_logdet(::AbstractArray, L, ::Any) = throw(ArgumentError(
 
 # A layer contributes the same term to both directions, with opposite signs, so the
 # inverse total is the negative of the forward total for the same chain.
-@inline function _inverse_step(Z, layer, mode::Val)
-    contributes_logdet(layer) || return (_step_out(inverse(Z, layer))[1], nothing)
-    return _inverse_with_logdet(Z, layer, mode)
+@inline function _inverse_step(Z, Ctx, layer, mode::Val)
+    contributes_logdet(layer) || return (_step_out(_ctx_inverse(Z, Ctx, layer))[1], nothing)
+    return _ctx_inverse_with_logdet(Z, Ctx, layer, mode)
 end
 
-_apply_inverse(X, logdet, ::Tuple{}, ::Val) = (X, logdet)
-function _apply_inverse(Z, logdet, layers::Tuple, mode::Val)
-    X, Δlogdet = _inverse_step(Z, first(layers), mode)
-    return _apply_inverse(X, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers), mode)
+@inline _ctx_inverse_with_logdet(Z, ::Nothing, layer, mode) = _inverse_with_logdet(Z, layer, mode)
+@inline _ctx_inverse_with_logdet(Z, Ctx::AbstractArray, layer, mode) =
+    _inverse_with_logdet(Z, layer, mode)
+@inline _ctx_inverse_with_logdet(Z, Ctx::AbstractArray, L::CouplingLayerSpline, mode) =
+    inverse(Z, Ctx, L; logdet=_mode_kwarg(mode))
+
+_apply_inverse(X, Ctx, logdet, ::Tuple{}, ::Val) = (X, logdet)
+function _apply_inverse(Z, Ctx, logdet, layers::Tuple, mode::Val)
+    X, Δlogdet = _inverse_step(Z, Ctx, first(layers), mode)
+    return _apply_inverse(X, Ctx, _accumulate_logdet(logdet, Δlogdet), Base.tail(layers), mode)
 end
 
 """
@@ -236,25 +272,30 @@ end
  See also: [`inverse_and_log_likelihood`](@ref), [`log_likelihood`](@ref)
 """
 inverse(Z::AbstractArray{T,N}, C::InvertibleChain; logdet=false) where {T,N} =
-    _inverse(Z, C, logdet_mode(logdet))
+    _inverse(Z, nothing, C, logdet_mode(logdet))
 
-_inverse(Z::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T,N} =
-    _apply_inverse(Z, reverse(C.layers))
+inverse(Z::AbstractArray{T,N}, Ctx::AbstractArray{T,N}, C::InvertibleChain;
+        logdet=false) where {T,N} =
+    _inverse(Z, Ctx, C, logdet_mode(logdet))
+
+_inverse(Z::AbstractArray{T,N}, Ctx, C::InvertibleChain, ::Val{false}) where {T,N} =
+    _apply_inverse(Z, Ctx, reverse(C.layers))
 
 # As `_chain_forward` above: accumulated per sample, reduced once.
-function _inverse(Z::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N}
+function _inverse(Z::AbstractArray{T,N}, Ctx, C::InvertibleChain, ::Val{true}) where {T,N}
     _check_inverse_logdet(C)
     if supports_per_sample_logdet(C)
-        X, v = _apply_inverse(Z, constant_per_sample(Z, zero(T)), reverse(C.layers), Val(:sample))
+        X, v = _apply_inverse(Z, Ctx, constant_per_sample(Z, zero(T)), reverse(C.layers),
+                              Val(:sample))
         return X, sum(v)/T(size(Z, N))
     end
-    return _apply_inverse(Z, zero(T), reverse(C.layers), Val(true))
+    return _apply_inverse(Z, Ctx, zero(T), reverse(C.layers), Val(true))
 end
 
-function _inverse(Z::AbstractArray{T,N}, C::InvertibleChain, mode::Val{:sample}) where {T,N}
+function _inverse(Z::AbstractArray{T,N}, Ctx, C::InvertibleChain, mode::Val{:sample}) where {T,N}
     _check_inverse_logdet(C)
     _check_per_sample_logdet(C)
-    return _apply_inverse(Z, constant_per_sample(Z, zero(T)), reverse(C.layers), mode)
+    return _apply_inverse(Z, Ctx, constant_per_sample(Z, zero(T)), reverse(C.layers), mode)
 end
 
 _check_inverse_logdet(C::InvertibleChain) = _check_accumulates_logdet(C)
@@ -265,19 +306,62 @@ _check_inverse_logdet(C::InvertibleChain) = _check_accumulates_logdet(C)
 @inline _backward_step(ΔY, Y, layer, w::AbstractVector) =
     contributes_logdet(layer) ? backward(ΔY, Y, layer; logdet_weight=w) : backward(ΔY, Y, layer)
 
-_apply_backward(ΔY, Y, ::Tuple{}, w) = (ΔY, Y)
-function _apply_backward(ΔY, Y, layers::Tuple, w)
-    ΔX, X = _backward_step(ΔY, Y, first(layers), w)
-    return _apply_backward(ΔX, X, Base.tail(layers), w)
+# One context feeds every conditional layer, so its cotangents ADD. Accumulating rather than
+# overwriting is the difference between a correct gradient and one that only looks correct at
+# depth 1 -- and a one-layer test would not catch it.
+@inline _accumulate_ctx(::Nothing, ::Nothing) = nothing
+@inline _accumulate_ctx(ΔCtx, ::Nothing) = ΔCtx
+@inline _accumulate_ctx(::Nothing, Δc) = Δc
+@inline _accumulate_ctx(ΔCtx, Δc) = ΔCtx .+ Δc
+
+@inline function _ctx_backward(ΔY, Y, ::Nothing, layer, w)
+    ΔX, X = _backward_step(ΔY, Y, layer, w)
+    return ΔX, nothing, X
+end
+@inline function _ctx_backward(ΔY, Y, Ctx::AbstractArray, layer, w)
+    ΔX, X = _backward_step(ΔY, Y, layer, w)
+    return ΔX, nothing, X
+end
+@inline _ctx_backward(ΔY, Y, Ctx::AbstractArray, layer::CouplingLayerSpline, ::Nothing) =
+    backward(ΔY, Y, Ctx, layer)
+@inline _ctx_backward(ΔY, Y, Ctx::AbstractArray, layer::CouplingLayerSpline, w::AbstractVector) =
+    contributes_logdet(layer) ? backward(ΔY, Y, Ctx, layer; logdet_weight=w) :
+                                backward(ΔY, Y, Ctx, layer)
+
+_apply_backward(ΔY, Y, Ctx, ΔCtx, ::Tuple{}, w) = (ΔY, ΔCtx, Y)
+function _apply_backward(ΔY, Y, Ctx, ΔCtx, layers::Tuple, w)
+    ΔX, Δc, X = _ctx_backward(ΔY, Y, Ctx, first(layers), w)
+    return _apply_backward(ΔX, X, Ctx, _accumulate_ctx(ΔCtx, Δc), Base.tail(layers), w)
 end
 
 function backward(ΔZ::AbstractArray{T,N}, Z::AbstractArray{T,N}, C::InvertibleChain;
                   set_grad::Bool=true, logdet_weight=nothing) where {T,N}
+    _check_backward_set_grad(set_grad)
+    ΔX, _, X = _apply_backward(ΔZ, Z, nothing, nothing, reverse(C.layers), logdet_weight)
+    return ΔX, X
+end
+
+"""
+    ΔX, ΔCtx, X = backward(ΔZ, Z, Ctx, C::InvertibleChain; logdet_weight=nothing)
+
+ Conditional backward pass: as the unconditional form, with the cotangent of the shared context
+ alongside. `ΔCtx` is the SUM over the layers that read it, and is zero when none does.
+"""
+function backward(ΔZ::AbstractArray{T,N}, Z::AbstractArray{T,N}, Ctx::AbstractArray{T,N},
+                  C::InvertibleChain; set_grad::Bool=true, logdet_weight=nothing) where {T,N}
+    _check_backward_set_grad(set_grad)
+    ΔX, ΔCtx, X = _apply_backward(ΔZ, Z, Ctx, nothing, reverse(C.layers), logdet_weight)
+    return ΔX, _ctx_cotangent(ΔCtx, Ctx), X
+end
+
+_check_backward_set_grad(set_grad::Bool) =
     set_grad || throw(ArgumentError("InvertibleChain only implements backward with " *
                                     "set_grad=true; use the layers directly for the " *
                                     "Jacobian interface"))
-    return _apply_backward(ΔZ, Z, reverse(C.layers), logdet_weight)
-end
+
+# A chain in which nothing reads the context still owes its caller a tangent of the right shape.
+@inline _ctx_cotangent(::Nothing, Ctx) = zero(Ctx)
+@inline _ctx_cotangent(ΔCtx, ::Any) = ΔCtx
 
 function jacobian(::AbstractArray{T,N}, ::AbstractVector{<:Parameter}, ::AbstractArray{T,N},
                   ::InvertibleChain) where {T,N}
@@ -388,6 +472,53 @@ end
 _per_sample_weight(w::AbstractVector, ::AbstractVector) = w
 _per_sample_weight(::AbstractZero, logdet::AbstractVector) = zero(logdet)
 _per_sample_weight(::Nothing, logdet::AbstractVector) = zero(logdet)
+
+"""
+    Z, logdet = flow_forward_per_sample(net, X, Ctx, θ)
+
+ Conditional form of [`flow_forward_per_sample`](@ref): the same single forward pass, with a
+ context tensor threaded into the layers that read one.
+
+ Its pullback returns a cotangent for `Ctx` as well as for `X` and the parameters, which is
+ what lets a trainable state encoder sit in front of the flow and be differentiated by ordinary
+ Zygote from there. Without it the encoder would be frozen SILENTLY -- the flow's own
+ parameters would still move and the loss would still fall.
+
+ Only the per-sample form is conditional. The batch-averaged [`flow_forward`](@ref) recovers an
+ arbitrary log-determinant weight with a second, zero-cotangent pass and a correction, which
+ would have to be extended to the context as well; the per-sample path pushes explicit weights
+ into the layers instead and needs no correction, so it is the one worth having conditional.
+"""
+flow_forward_per_sample(net::Invertible, X::AbstractArray, Ctx::AbstractArray, ::Any) =
+    forward(X, Ctx, net; logdet=:sample)
+
+function ChainRulesCore.rrule(::typeof(flow_forward_per_sample), net::Invertible, X, Ctx, θ)
+    out = forward(X, Ctx, net; logdet=:sample)
+    function flow_forward_per_sample_cond_pullback(Δout)
+        ΔZ, Δlogdet = _output_cotangent(unthunk(Δout))
+        Z = out[1]
+        ΔX, ΔCtx, Δθ = _flow_backward_weighted(net, _input_cotangent(ΔZ, Z), Z, Ctx,
+                                               _per_sample_weight(Δlogdet, out[2]))
+        return NoTangent(), NoTangent(), ΔX, ΔCtx, Δθ
+    end
+    return out, flow_forward_per_sample_cond_pullback
+end
+
+function _flow_backward_weighted(net::Invertible, ΔZ, Z, Ctx::AbstractArray, w)
+    params = get_params(net)
+    clear_grad!(params)
+    ΔX, ΔCtx, _ = backward(copy(ΔZ), copy(Z), Ctx, net; logdet_weight=w)
+    return ΔX, ΔCtx, getfield.(params, :grad)
+end
+
+"""
+    Z, logdet = forward_per_sample(X, Ctx, net)
+
+ Conditional form of [`forward_per_sample`](@ref). Differentiable with Zygote/Flux in the
+ parameters of `net` and in `Ctx`.
+"""
+forward_per_sample(X::AbstractArray, Ctx::AbstractArray, net::Invertible) =
+    flow_forward_per_sample(net, X, Ctx, parameter_data(net))
 
 # One pass: with explicit per-sample weights the layers compute the gradient the loss
 # actually asked for, so there is nothing to correct afterwards.
@@ -623,6 +754,45 @@ function _log_likelihood_per_sample(X::AbstractArray{T,N}, net::Invertible, ::Va
     Z, logdet = flow_forward_per_sample(net, X, parameter_data(net))
     return logpdf_per_sample(d, Z; normalized=normalized) .+ logdet
 end
+
+"""
+    f = log_likelihood_per_sample(X, Ctx, net; μ=0f0, σ=1f0, normalized=false, base=nothing)
+
+ Conditional form of [`log_likelihood_per_sample`](@ref)`(X, net)`: the per-sample log-density
+ of `X` under the flow `net` conditioned on `Ctx`, as a vector of length `size(X, N)`.
+
+ `Ctx` carries ONE context per sample -- its batch dimension matches `X`'s -- so a batch of
+ different conditions is scored in a single pass. That is the case worth optimizing for: the
+ caller that needs this is scoring a minibatch in which every entry has its own condition.
+
+ Requires every log-determinant in `net` to be reportable per sample, and requires some layer
+ in `net` to actually read the context: a chain that silently ignored it would return a
+ perfectly ordinary unconditional density, and the only symptom would be a state pathway that
+ never learns.
+
+ See also: [`log_likelihood_per_sample`](@ref), [`forward_per_sample`](@ref)
+"""
+function log_likelihood_per_sample(X::AbstractArray{T,N}, Ctx::AbstractArray, net::Invertible;
+                                   μ=T(0), σ=T(1), normalized::Bool=false,
+                                   base=nothing) where {T,N}
+    d = _latent_base(base, μ, σ, T)
+    check_latent_support(net, d)
+    _check_consumes_context(net)
+    # Same setup side effect as the unconditional form, hidden from AD for the same reason.
+    init!(net, X, Ctx)
+    Z, logdet = flow_forward_per_sample(net, X, Ctx, parameter_data(net))
+    return logpdf_per_sample(d, Z; normalized=normalized) .+ logdet
+end
+
+# Checked once per loss evaluation, at the entry point, rather than per layer per sample.
+function _check_consumes_context(C::InvertibleChain)
+    any(_consumes_context, C.layers) && return nothing
+    throw(ArgumentError(
+        "a context was supplied but no layer in this network reads one: build the coupling " *
+        "layers with n_ctx = size(Ctx, ndims(Ctx)-1). Scoring would otherwise ignore the " *
+        "context and report an unconditional density."))
+end
+_check_consumes_context(::Any) = nothing
 
 # One pass per sample, for networks whose layers only report a batch-averaged
 # log-determinant.

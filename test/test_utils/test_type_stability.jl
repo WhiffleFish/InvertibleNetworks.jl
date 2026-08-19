@@ -41,8 +41,14 @@ inferred_type(f, argtypes...) = only(Base.return_types(f, Tuple{argtypes...}))
             spline_layer = CouplingLayerSpline(4, 8; spline=kind, logdet=true)
             @test inferred_type(InvertibleNetworks.forward, typeof(X), typeof(spline_layer)) ==
                   Tuple{Array{Float32,4},Float32}
-            @test inferred_type(InvertibleNetworks._forward, typeof(X), typeof(spline_layer),
-                                Val{:sample}) == Tuple{Array{Float32,4},Vector{Float32}}
+            @test inferred_type(InvertibleNetworks._forward, typeof(X), Nothing,
+                                typeof(spline_layer), Val{:sample}) ==
+                  Tuple{Array{Float32,4},Vector{Float32}}
+            # ...and the conditional pass has to infer just as concretely
+            ctx_layer = CouplingLayerSpline(4, 8; spline=kind, logdet=true, n_ctx=2)
+            @test inferred_type(InvertibleNetworks._forward, typeof(X), Array{Float32,4},
+                                typeof(ctx_layer), Val{:sample}) ==
+                  Tuple{Array{Float32,4},Vector{Float32}}
             @test inferred_type(InvertibleNetworks.forward, typeof(X),
                                 typeof(SplineLayer(4; spline=kind, logdet=true))) ==
                   Tuple{Array{Float32,4},Float32}
@@ -97,8 +103,8 @@ end
                            CouplingLayerGlow(8, 16; logdet=true, dense=true))
     @test inferred_type(InvertibleNetworks.forward, typeof(V), typeof(flow)) ==
           Tuple{Matrix{Float32},Float32}
-    @test inferred_type(InvertibleNetworks._chain_forward, typeof(V), typeof(flow), Val{true}) ==
-          Tuple{Matrix{Float32},Float32}
+    @test inferred_type(InvertibleNetworks._chain_forward, typeof(V), Nothing, typeof(flow),
+                        Val{true}) == Tuple{Matrix{Float32},Float32}
 end
 
 @testset "Channel views" begin
