@@ -57,7 +57,7 @@ or
 
  See also: [`Conv1x1`](@ref), [`ResidualBlock!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct CouplingLayerIRIM{C<:Conv1x1,R<:Union{ResidualBlock,FluxBlock}} <: NeuralNetLayer
+struct CouplingLayerIRIM{C<:Conv1x1,R<:ConditionerBlock} <: NeuralNetLayer
     C::C
     RB::R
 end

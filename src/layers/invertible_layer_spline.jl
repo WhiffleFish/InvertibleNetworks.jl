@@ -114,7 +114,7 @@ or
  See also: [`SplineSpec`](@ref), [`SplineLayer`](@ref), [`CouplingLayerGlow`](@ref),
  [`Conv1x1`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct CouplingLayerSpline{C<:Union{Conv1x1,Nothing},R<:Union{ResidualBlock,FluxBlock},S<:SplineSpec,LD} <: NeuralNetLayer
+struct CouplingLayerSpline{C<:Union{Conv1x1,Nothing},R<:ConditionerBlock,S<:SplineSpec,LD} <: NeuralNetLayer
     C::C
     RB::R
     spline::S
@@ -123,7 +123,7 @@ struct CouplingLayerSpline{C<:Union{Conv1x1,Nothing},R<:Union{ResidualBlock,Flux
 end
 
 CouplingLayerSpline(C::CT, RB::RT, spec::ST, logdet::Bool, swap::Bool) where
-    {CT<:Union{Conv1x1,Nothing},RT<:Union{ResidualBlock,FluxBlock},ST<:SplineSpec} =
+    {CT<:Union{Conv1x1,Nothing},RT<:ConditionerBlock,ST<:SplineSpec} =
     CouplingLayerSpline{CT,RT,ST,logdet}(C, RB, spec, logdet, swap)
 
 Flux.@layer CouplingLayerSpline
@@ -134,7 +134,7 @@ Base.show(io::IO, L::CouplingLayerSpline) =
     print(io, "CouplingLayerSpline($(L.spline)$(isnothing(L.C) ? ", mix=false" : "")$(L.swap ? ", swap=true" : ""))")
 
 # Constructor from an existing convolution, conditioner and spline shape.
-CouplingLayerSpline(C::Union{Conv1x1,Nothing}, RB::Union{ResidualBlock,FluxBlock},
+CouplingLayerSpline(C::Union{Conv1x1,Nothing}, RB::ConditionerBlock,
                     spec::SplineSpec; logdet=false, swap=false) =
     CouplingLayerSpline(C, RB, spec, logdet, swap)
 

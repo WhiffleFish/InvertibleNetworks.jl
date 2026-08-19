@@ -312,3 +312,25 @@ end
 
 @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f0)
 @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+###################################################################################################
+# The log-determinant term's parameter gradient is a function of the parameters alone, so the
+# `set_grad=false` interface must report the same one whatever cotangent it is handed. It used
+# to push the *data* cotangent through the conditioner for this term instead of the
+# log-determinant's own derivative, making it depend on ΔY.
+
+@testset "grad-logdet is independent of the cotangent" begin
+    L = CouplingLayerGlow(4, 8; logdet=true)
+    Y = randn(Float32, 8, 8, 4, 4)
+    spread(a, b) = maximum(maximum(abs.(x.data .- y.data)) for (x, y) in zip(a, b))
+
+    _, _, _, g1 = L.backward(randn(Float32, 8, 8, 4, 4), Y; set_grad=false)
+    _, _, _, g2 = L.backward(randn(Float32, 8, 8, 4, 4), Y; set_grad=false)
+    _, _, _, g3 = L.backward(zeros(Float32, 8, 8, 4, 4), Y; set_grad=false)
+
+    @test spread(g1, g2) == 0f0
+    @test spread(g1, g3) == 0f0
+    # ...and it is not simply zero
+    @test maximum(maximum(abs.(p.data)) for p in g1) > 0f0
+end

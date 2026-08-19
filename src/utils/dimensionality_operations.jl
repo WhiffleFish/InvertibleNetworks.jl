@@ -3,7 +3,7 @@
 # Date: January 2020
 
 export squeeze, unsqueeze, wavelet_squeeze, wavelet_unsqueeze, Haar_squeeze, invHaar_unsqueeze 
-export tensor_split, tensor_cat
+export tensor_split, tensor_cat, channel_view, channel_copy, channel_halves
 export cat_states, split_states
 export ShuffleLayer, WaveletLayer, HaarLayer
 ###############################################################################
@@ -402,6 +402,56 @@ end
 
 ####################################################################################################
 # Split and concatenate
+
+# The dimension that `tensor_split`/`tensor_cat` treat as the channel axis: the second-to-last,
+# except for a plain `(dim, batch)` matrix, whose leading dimension plays that role.
+@inline channel_dim(::AbstractArray{T, N}) where {T, N} = max(1, N-1)
+
+@inline channel_split_index(X::AbstractArray) = round(Int, size(X, channel_dim(X))/2)
+
+"""
+    Xv = channel_view(X, r)
+
+ A view of `X` over the channel range `r`.
+
+ [`tensor_split`](@ref) materializes, because its outputs feed convolutions and matrix
+ multiplies, which need contiguous storage. A consumer that only broadcasts over the result --
+ or writes into it -- needs no copy, and for a channel range of a batched tensor that copy is
+ the entire cost of the split.
+
+ See also: [`tensor_split`](@ref), [`channel_halves`](@ref)
+"""
+@inline channel_view(X::AbstractArray{T, N}, r) where {T, N} =
+    view(X, ntuple(i -> i == channel_dim(X) ? r : Colon(), Val(N))...)
+
+"""
+    Xc = channel_copy(X, r)
+
+ A materialized copy of `X` over the channel range `r`, for the consumers that do need
+ contiguous storage: convolutions and matrix multiplies. The counterpart of
+ [`channel_view`](@ref).
+
+ See also: [`channel_view`](@ref)
+"""
+@inline channel_copy(X::AbstractArray{T, N}, r) where {T, N} =
+    X[ntuple(i -> i == channel_dim(X) ? r : Colon(), Val(N))...]
+
+@inline channel_count(X::AbstractArray) = size(X, channel_dim(X))
+
+# The channel range that `tensor_split` gives as its second half.
+@inline channel_tail(X::AbstractArray, k::Integer) = (k+1):channel_count(X)
+
+"""
+    Xv1, Xv2 = channel_halves(X)
+
+ Views of the two channel halves of `X`, split where [`tensor_split`](@ref) splits it.
+
+ See also: [`channel_view`](@ref), [`tensor_split`](@ref)
+"""
+@inline function channel_halves(X::AbstractArray)
+    k = channel_split_index(X)
+    return channel_view(X, 1:k), channel_view(X, channel_tail(X, k))
+end
 
 """
     Y, Z = tensor_split(X)

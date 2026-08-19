@@ -25,6 +25,7 @@ basics = ["test_utils/test_objectives.jl",
           # Layers
 layers = ["test_layers/test_residual_block.jl",
           "test_layers/test_flux_block.jl",
+          "test_layers/test_mlp_block.jl",
           "test_layers/test_resnet.jl",
           "test_layers/test_layer_conv1x1.jl",
           "test_layers/test_coupling_layer_basic.jl",

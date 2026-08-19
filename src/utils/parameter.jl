@@ -3,6 +3,7 @@
 # Date: January 2020
 
 export Parameter, get_params, get_grads, set_params!, par2vec, vec2par
+export OUT_INIT_SCALE
 
 mutable struct Parameter{D}
     data::D
@@ -28,6 +29,28 @@ end
 
 """
 Parameter(x) = Parameter(x, nothing)
+
+"""
+    OUT_INIT_SCALE
+
+Factor applied to the initialization of a conditioner block's output weight
+([`ResidualBlock`](@ref), [`MLPBlock`](@ref)).
+
+A coupling layer reads its conditioner's output as a (log-scale, shift) pair, so the output has
+to be linear -- an activation there would confine both halves to one sign. Linear and
+`glorot_uniform`, though, means the log-scale is spread over several units at initialization,
+and a scale of `sigmoid(-3)` costs a factor of 20 in the inverse direction. That compounds
+through depth, and a recursive coupling such as [`CouplingLayerHINT`](@ref) applied in reverse
+can overflow `Float32` before it has been trained at all.
+
+Shrinking the output weight puts every coupling layer near its identity map at initialization
+and leaves training free to move away from it -- Glow zero-initializes the same weight, and
+FrEIA scales the same quantity by the same order. It is a keyword on both constructors, so a
+caller who wants the unshrunk initialization can ask for `out_scale=1`.
+"""
+const OUT_INIT_SCALE = 0.1f0
+
+
 
 # Size and length for parameter types
 size(x::Parameter) = size(x.data)

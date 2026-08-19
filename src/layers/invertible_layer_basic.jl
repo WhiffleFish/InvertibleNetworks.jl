@@ -58,7 +58,7 @@ or
 
  See also: [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-mutable struct CouplingLayerBasic{R<:Union{ResidualBlock,FluxBlock},A<:ActivationFunction} <: NeuralNetLayer
+mutable struct CouplingLayerBasic{R<:ConditionerBlock,A<:ActivationFunction} <: NeuralNetLayer
     RB::R
     logdet::Bool
     activation::A
@@ -69,7 +69,7 @@ Flux.@layer CouplingLayerBasic
 
 # Constructor from 1x1 convolution and residual block
 function CouplingLayerBasic(RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())
-    RB.fan == false && throw("Set ResidualBlock.fan == true")
+    _check_fan(RB)
     return CouplingLayerBasic(RB, logdet, activation, false)
 end
 

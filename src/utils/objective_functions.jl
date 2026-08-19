@@ -116,6 +116,32 @@ form of `sum(log.(abs.(S)))/size(S)[end]`.
 @inline constant_per_sample(X::AbstractArray{T, N}, v) where {T, N} =
     fill!(similar(X, T, size(X, N)), v)
 
+# As above, from a reduction that has been left as a one-element array instead of being
+# brought back to the host. See `logdet_device`.
+@inline constant_per_sample(X::AbstractArray{T, N}, v::AbstractArray) where {T, N} =
+    similar(X, T, size(X, N)) .= v
+
+"""
+    v = logdet_device(spatial, s)
+
+Log-determinant of a constant elementwise scaling `s` repeated over `spatial` positions, left
+as a one-element array rather than reduced to a scalar.
+
+`sum` over a `CuArray` returns a host scalar, and fetching it synchronizes the device. That
+cost is invisible on its own and serializing for a deep flow, which pays it once per such
+layer per pass, so the per-sample path keeps the reduction where it was computed and lets it
+broadcast into place.
+"""
+@inline logdet_device(spatial::Tuple, s) = _logdet_device(spatial, s.data)
+
+# The scaling is a vector for `ActNorm` and a full `(nx, ny, nc)` array for `AffineLayer`, so
+# the reduction has to cover every dimension of it; `vec` then makes the result a one-element
+# vector whatever its rank was.
+@inline function _logdet_device(spatial::Tuple, A::AbstractArray{T, M}) where {T, M}
+    dims = ntuple(identity, Val(M))
+    return prod(spatial) .* vec(sum(log.(abs.(A)); dims=dims))
+end
+
 # Weighting of the log-determinant in a backward pass.
 #
 # The hand-written `backward` of every layer computes the gradient of an objective whose

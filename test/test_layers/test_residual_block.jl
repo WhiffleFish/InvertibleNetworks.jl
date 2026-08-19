@@ -176,3 +176,51 @@ for activation in [ReLUlayer(), LeakyReLUlayer()]
     b = dot(dX, dX_)+dot(dθ, dθ_)
     @test isapprox(a, b; rtol=1f-3)
 end
+
+
+###################################################################################################
+# `fan=true` is the coupling-conditioner output and must be linear.
+#
+# It used to have `RB.activation` applied to it, which for the default ReLU confined the whole
+# output to the non-negative orthant. A coupling layer reads that output as a (log-scale, shift)
+# pair, so the scale could only ever contract and the shift only ever push one way.
+
+@testset "fan=true output is linear" begin
+    RB = ResidualBlock(4, 8; n_out=8, fan=true)
+    X = 3f0 .* randn(Float32, 16, 16, 4, 4)
+    Y = RB.forward(X)
+    @test minimum(Y) < 0f0
+    @test maximum(Y) > 0f0
+
+    # ...and it is exactly the third convolution's output, with nothing applied on top
+    state = InvertibleNetworks.block_forward_save(X, RB)
+    @test state[3] === state[6]
+
+    # `fan=false` keeps its gated linear output, and its halved channel count
+    RB0 = ResidualBlock(4, 8; n_out=8, fan=false)
+    @test size(RB0.forward(X), 3) == 4
+end
+
+
+###################################################################################################
+# A linear conditioner output makes the log-scale unbounded, and `sigmoid` of a few negative
+# units is a large factor in the inverse direction. `OUT_INIT_SCALE` keeps every coupling layer
+# near its identity map at initialization so that a recursive coupling applied in reverse does
+# not overflow before it has been trained.
+
+@testset "reversed coupling is conditioned at init" begin
+    Random.seed!(4)
+    L = CouplingLayerHINT(16, 64; logdet=false, permute="full")
+    R = reverse(L)
+    X = randn(Float32, 32, 32, 16, 2)
+    Y = R.forward(X)
+    @test all(isfinite, Y)
+    @test maximum(abs, Y) < 1f3
+    @test isapprox(norm(X - R.inverse(Y))/norm(X), 0f0; atol=1f-5)
+
+    # ...and the shift half of the conditioner output can be negative, which is the point
+    Lb = CouplingLayerBasic(16, 64; logdet=false)
+    _, T = InvertibleNetworks.tensor_split(
+        InvertibleNetworks.block_forward(randn(Float32, 32, 32, 16, 2), Lb.RB))
+    @test minimum(T) < 0f0
+end

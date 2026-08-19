@@ -321,3 +321,33 @@ function ExpClampGrad(Δy::AbstractArray{T, N}, y::AbstractArray{T, N}; x=nothin
 end
 
 ExpClampGrad(Δy::AbstractArray{T, N}, ::Nothing; x=nothing, clamp=T(2)) where {T, N} = clamp * T(0.636) * Δy .* y ./ (1 .+ x.^2)
+
+
+# Scalar form of an activation's forward map, when there is one.
+#
+# `activation.forward` takes and returns an array, so `activation.forward(Y .+ b)` has to
+# materialize `Y .+ b` before applying the activation: two kernels and two temporaries where
+# one of each would do. Handing back the scalar function instead lets the caller write the
+# whole thing as a single fused broadcast. `nothing` means "no scalar form available", which
+# the callers treat as "fall back to the two-step version"; since it is decided by the type
+# of `forward`, the branch is resolved at compile time.
+scalar_form(::Any) = nothing
+scalar_form(::typeof(ReLU)) = relu
+scalar_form(::typeof(LeakyReLU)) = _leakyrelu_default
+
+_leakyrelu_default(x::T) where T = leakyrelu(x, T(0.01))
+
+"""
+    Y = bias_activation(activation, Y, b)
+
+ `activation.forward(Y .+ b)`, fused into one broadcast where the activation allows it.
+"""
+@inline bias_activation(a::ActivationFunction, Y, b) = _bias_activation(scalar_form(a.forward), a, Y, b)
+@inline _bias_activation(::Nothing, a::ActivationFunction, Y, b) = a.forward(Y .+ b)
+@inline _bias_activation(f, ::ActivationFunction, Y, b) = f.(Y .+ b)
+
+# As above, for the residual block's second convolution, whose pre-activation carries the
+# skip connection as well as the bias.
+@inline bias_activation(a::ActivationFunction, Y, S, b) = _bias_activation(scalar_form(a.forward), a, Y, S, b)
+@inline _bias_activation(::Nothing, a::ActivationFunction, Y, S, b) = a.forward(Y .+ S .+ b)
+@inline _bias_activation(f, ::ActivationFunction, Y, S, b) = f.(Y .+ S .+ b)

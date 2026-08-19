@@ -69,7 +69,7 @@ Flux.@layer ConditionalLayerGlow
 
 # Constructor from 1x1 convolution and residual block
 function ConditionalLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())
-    RB.fan == false && throw("Set ResidualBlock.fan == true")
+    _check_fan(RB)
     return ConditionalLayerGlow(C, RB, logdet, activation)
 end
 

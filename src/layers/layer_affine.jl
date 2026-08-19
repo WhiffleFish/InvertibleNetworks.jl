@@ -74,7 +74,7 @@ _affine_out(out, ::AbstractArray, ::AffineLayer, ::Val{false}, sign) = out
 _affine_out(out, ::AbstractArray{T, N}, AL::AffineLayer, ::Val{true}, sign) where {T, N} =
     (out, sign*logdet_forward(AL.s))
 _affine_out(out, X::AbstractArray{T, N}, AL::AffineLayer, ::Val{:sample}, sign) where {T, N} =
-    (out, constant_per_sample(X, T(sign*logdet_forward(AL.s))))
+    (out, constant_per_sample(X, sign .* logdet_device((), AL.s)))
 
 # Backward pass: Input (ΔY, Y), Output (ΔY, Y)
 function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AL::AffineLayer; set_grad::Bool=true, logdet_weight=nothing) where {T, N}

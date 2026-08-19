@@ -39,7 +39,7 @@ for (nx,L) in [(32,2),(2,1)] # nx=2 is difficult because can only do one multisc
         ~isnothing(p.grad) && (  gsum += 1)
     end
 
-    param_factor = 11
+    param_factor = 10   # ActNorm 2 + Conv1x1 3 + MLPBlock 5
     @test isequal(gsum, L*K*param_factor)
 
     clear_grad!(G)
@@ -49,6 +49,13 @@ for (nx,L) in [(32,2),(2,1)] # nx=2 is difficult because can only do one multisc
     end
     @test isequal(gsum, 0)
 
+    # The gradient tests below measure convergence *rates*, so each error in the sequence has to
+    # sit well above Float32 round-off. `OUT_INIT_SCALE` deliberately shrinks the conditioner's
+    # output weight to keep an untrained coupling near its identity map, which shrinks the
+    # loss's response to a perturbation by the same factor; undo it here. Initialization scale
+    # has nothing to do with whether the gradient is correct.
+    rescale_out!(net) = (for cl in net.CL; cl.RB.W3.data ./= OUT_INIT_SCALE; end; net)
+
     ###################################################################################################
     # Gradient test
     function loss_dense(L, X)
@@ -56,11 +63,11 @@ for (nx,L) in [(32,2),(2,1)] # nx=2 is difficult because can only do one multisc
         f = -log_likelihood(Y) - logdet
         ΔY = -∇log_likelihood(Y)
         ΔX, X_ = L.backward(ΔY, Y)
-        return f, ΔX, L.CL[1,1].RB.params[1].grad
+        return f, ΔX, L.CL[1,1].RB.W1.grad
     end
 
     # Gradient test w.r.t. input
-    G = NetworkGlow(n_in, n_hidden, L, K; dense=dense, nx=nx,  ndims=length(N))
+    G = rescale_out!(NetworkGlow(n_in, n_hidden, L, K; dense=dense, nx=nx,  ndims=length(N)))
     X = rand(Float32, N..., n_in, batchsize)
     X0 = rand(Float32, N..., n_in, batchsize)
     dX = X - X0
@@ -86,12 +93,12 @@ for (nx,L) in [(32,2),(2,1)] # nx=2 is difficult because can only do one multisc
 
     # Gradient test w.r.t. parameters
     X = rand(Float32, N..., n_in, batchsize)
-    G = NetworkGlow(n_in, n_hidden, L, K; dense=dense, nx=nx,   ndims=length(N))
-    G0 = NetworkGlow(n_in, n_hidden, L, K; dense=dense, nx=nx,  ndims=length(N))
+    G = rescale_out!(NetworkGlow(n_in, n_hidden, L, K; dense=dense, nx=nx,   ndims=length(N)))
+    G0 = rescale_out!(NetworkGlow(n_in, n_hidden, L, K; dense=dense, nx=nx,  ndims=length(N)))
     Gini = deepcopy(G0)
 
     # Test one parameter from residual block and 1x1 conv
-    dW = G.CL[1,1].RB.params - G0.CL[1,1].RB.params
+    dW = G.CL[1,1].RB.W1.data - G0.CL[1,1].RB.W1.data
 
     f0, ΔX, ΔW = loss_dense(G0, X)
     h = 0.1f0
@@ -101,10 +108,10 @@ for (nx,L) in [(32,2),(2,1)] # nx=2 is difficult because can only do one multisc
 
     print("\nGradient test glow: parameters\n")
     for j=1:maxiter
-        set_params!(G0.CL[1,1].RB, Gini.CL[1,1].RB.params + h*dW)
+        G0.CL[1,1].RB.W1.data = Gini.CL[1,1].RB.W1.data + h*dW
         f = loss_dense(G0, X)[1]
         err3[j] = abs(f - f0)
-        err4[j] = abs(f - f0 - h*dot(dW[1].data, ΔW))
+        err4[j] = abs(f - f0 - h*dot(dW, ΔW))
         print(err3[j], "; ", err4[j], "\n")
         h = h/2f0
     end

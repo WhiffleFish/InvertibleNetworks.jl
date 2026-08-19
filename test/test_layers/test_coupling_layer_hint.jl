@@ -94,6 +94,15 @@ function grad_test_layer(nx, ny, n_channel, n_hidden, batchsize, permute, logdet
     rev && (HL0 = reverse(HL0))
 
     X = glorot_uniform(nx, ny, n_channel, batchsize)
+    # This is a convergence-*rate* test, so every error in the sequence has to sit well above
+    # Float32 round-off or the measured rate is noise. `OUT_INIT_SCALE` deliberately shrinks the
+    # conditioner's output weight to keep an untrained coupling near its identity map, which
+    # also shrinks the loss's response to a perturbation by the same factor; undo it here, in
+    # the same spirit as the scaling of `W1` just below. Initialization scale has nothing to do
+    # with whether the gradient is correct.
+    for L in (HL, HL0), cl in L.CL
+        cl.RB.W3.data ./= OUT_INIT_SCALE
+    end
     HL.CL[1].RB.W1.data *= 4f0
     HL0.CL[1].RB.W1.data *= 4f0 # make weights larger
     HLini = deepcopy(HL0)

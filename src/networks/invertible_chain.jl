@@ -156,8 +156,23 @@ forward(X::AbstractArray{T,N}, C::InvertibleChain{L,LD}; logdet=nothing) where {
 _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T,N} =
     _apply_forward(X, zero(T), C.layers, Val(true))[1]
 
-_chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N} =
-    _apply_forward(X, zero(T), C.layers, Val(true))
+# The batch-averaged scalar, accumulated per sample and reduced once at the end.
+#
+# Every layer that reports a batch-averaged log-determinant reduces all the way to a scalar,
+# and on a GPU reading that scalar back synchronizes the device: a deep flow stalls once per
+# layer per pass, which is why its cost per sample stays flat as the batch grows. Accumulating
+# the per-sample vector instead keeps everything on the device until the single reduction here.
+# `sum(v)/batchsize` is what the per-layer averages summed to anyway, up to reassociation.
+#
+# A chain containing a layer that can only report a batch average falls back to the original
+# per-layer accumulation. Both branches return `(Z, ::T)`, so the choice costs no inference.
+function _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N}
+    if supports_per_sample_logdet(C)
+        Z, v = _apply_forward(X, constant_per_sample(X, zero(T)), C.layers, Val(:sample))
+        return Z, sum(v)/T(size(X, N))
+    end
+    return _apply_forward(X, zero(T), C.layers, Val(true))
+end
 
 function _chain_forward(X::AbstractArray{T,N}, C::InvertibleChain, mode::Val{:sample}) where {T,N}
     _check_accumulates_logdet(C)
@@ -226,8 +241,13 @@ inverse(Z::AbstractArray{T,N}, C::InvertibleChain; logdet=false) where {T,N} =
 _inverse(Z::AbstractArray{T,N}, C::InvertibleChain, ::Val{false}) where {T,N} =
     _apply_inverse(Z, reverse(C.layers))
 
+# As `_chain_forward` above: accumulated per sample, reduced once.
 function _inverse(Z::AbstractArray{T,N}, C::InvertibleChain, ::Val{true}) where {T,N}
     _check_inverse_logdet(C)
+    if supports_per_sample_logdet(C)
+        X, v = _apply_inverse(Z, constant_per_sample(Z, zero(T)), reverse(C.layers), Val(:sample))
+        return X, sum(v)/T(size(Z, N))
+    end
     return _apply_inverse(Z, zero(T), reverse(C.layers), Val(true))
 end
 

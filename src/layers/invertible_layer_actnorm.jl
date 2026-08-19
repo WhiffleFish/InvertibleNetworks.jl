@@ -93,7 +93,7 @@ _actnorm_out(Y, ::AbstractArray, ::ActNorm, ::Val{false}) = Y
 _actnorm_out(Y, X::AbstractArray{T, N}, AN::ActNorm, ::Val{true}) where {T, N} =
     (Y, logdet_forward(size(X)[1:N-2]..., AN.s))
 _actnorm_out(Y, X::AbstractArray{T, N}, AN::ActNorm, ::Val{:sample}) where {T, N} =
-    (Y, constant_per_sample(X, T(logdet_forward(size(X)[1:N-2]..., AN.s))))
+    (Y, constant_per_sample(X, logdet_device(size(X)[1:N-2], AN.s)))
 
 function _forward(X::AbstractArray{T, N}, AN::ActNorm, mode::Val) where {T, N}
     inds = channel_indices(Val(N))
@@ -148,7 +148,7 @@ _actnorm_inverse_out(X, ::AbstractArray, ::ActNorm, ::Val{false}) = X
 _actnorm_inverse_out(X, Y::AbstractArray{T, N}, AN::ActNorm, ::Val{true}) where {T, N} =
     (X, -logdet_forward(size(Y)[1:N-2]..., AN.s))
 _actnorm_inverse_out(X, Y::AbstractArray{T, N}, AN::ActNorm, ::Val{:sample}) where {T, N} =
-    (X, constant_per_sample(Y, T(-logdet_forward(size(Y)[1:N-2]..., AN.s))))
+    (X, constant_per_sample(Y, -logdet_device(size(Y)[1:N-2], AN.s)))
 
 # 2-3D Backward pass: Input (ΔY, Y), Output (ΔY, Y)
 function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNorm; set_grad::Bool = true, logdet_weight=nothing) where {T, N}

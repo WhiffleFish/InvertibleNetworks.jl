@@ -36,9 +36,11 @@ or
  - `s1`, `s2`: stride for the first and third convolution (`s1`) and the second convolution (`s2`)
 
  - `fan`: bool to indicate whether the ouput has twice the number of input channels. For `fan=false`, the last
-    activation function is a gated linear unit (thereby bringing the output back to the original dimensions).
-    For `fan=true`, the last activation is a ReLU, in which case the output has twice the number of channels
-    as the input.
+    activation is a gated linear unit (thereby bringing the output back to the original dimensions).
+    For `fan=true`, the output is linear and has `n_out` channels -- the form a coupling layer needs, since it
+    reads the output as a concatenated (log-scale, shift) pair.
+
+ - `out_scale`: factor applied to the initialization of the output weight `W3`; see [`OUT_INIT_SCALE`](@ref).
 
 or
 
@@ -82,7 +84,7 @@ Flux.@layer ResidualBlock
 #  Constructors
 
 # Constructor
-function ResidualBlock(n_in, n_hidden; n_out=nothing, activation::ActivationFunction=ReLUlayer(), k1=3, k2=3, p1=1, p2=1, s1=1, s2=1, fan=false, ndims=2)
+function ResidualBlock(n_in, n_hidden; n_out=nothing, activation::ActivationFunction=ReLUlayer(), k1=3, k2=3, p1=1, p2=1, s1=1, s2=1, fan=false, ndims=2, out_scale=OUT_INIT_SCALE)
     # default/legacy behaviour
     isnothing(n_out) && (n_out = 2*n_in)
 
@@ -91,7 +93,7 @@ function ResidualBlock(n_in, n_hidden; n_out=nothing, activation::ActivationFunc
     # Initialize weights
     W1 = Parameter(glorot_uniform(k1..., n_in, n_hidden))
     W2 = Parameter(glorot_uniform(k2..., n_hidden, n_hidden))
-    W3 = Parameter(glorot_uniform(k1..., n_out, n_hidden))
+    W3 = Parameter(out_scale .* glorot_uniform(k1..., n_out, n_hidden))
     b1 = Parameter(zeros(Float32, n_hidden))
     b2 = Parameter(zeros(Float32, n_hidden))
 
@@ -132,7 +134,34 @@ block_forward_save(X, RB::ResidualBlock) = _forward(X, RB, Val(true))
 block_output(Y::AbstractArray) = Y
 block_output(state::NTuple{6,AbstractArray}) = state[6]
 
-function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{save}) where {T, N, save}
+# `fan=true` is the coupling-conditioner output: `n_out` channels, read by the caller as a
+# concatenated (log-scale, shift) pair, and therefore *linear*. Applying `RB.activation` here
+# -- ReLU, by default -- confined both halves to the non-negative orthant, so an affine
+# coupling could only ever contract (its log-determinant was negative by construction) and
+# only ever shift in one direction. `fan=false` keeps its gated linear output, which is what
+# a caller wanting a nonlinearity on the output asks for.
+@inline _fan_out(Y3, fan::Bool) = fan ? Y3 : GaLU(Y3)
+
+# Two methods rather than one with `if save`: the saving path has to materialize the
+# pre-activations `Y1`/`Y2` that `block_backward` reads, and the non-saving path does not,
+# which lets each bias and activation collapse into one fused broadcast instead of a kernel
+# and a temporary each.
+function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{false}) where {T, N}
+    inds = channel_indices(Val(N))
+
+    Yc1 = conv(X1, RB.W1.data; stride=RB.strides[1], pad=RB.pad[1])
+    X2 = bias_activation(RB.activation, Yc1, reshape(RB.b1.data, inds...))
+
+    Yc2 = conv(X2, RB.W2.data; stride=RB.strides[2], pad=RB.pad[2])
+    X3 = bias_activation(RB.activation, Yc2, X2, reshape(RB.b2.data, inds...))
+
+    cdims3 = DCDims(X1, RB.W3.data; stride=RB.strides[1], padding=RB.pad[1])
+    Y3 = ∇conv_data(X3, RB.W3.data, cdims3)
+
+    return _fan_out(Y3, RB.fan)
+end
+
+function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{true}) where {T, N}
     inds = channel_indices(Val(N))
 
     Y1 = conv(X1, RB.W1.data; stride=RB.strides[1], pad=RB.pad[1])
@@ -146,9 +175,8 @@ function _forward(X1::AbstractArray{T, N}, RB::ResidualBlock, ::Val{save}) where
     cdims3 = DCDims(X1, RB.W3.data; stride=RB.strides[1], padding=RB.pad[1])
     Y3 = ∇conv_data(X3, RB.W3.data, cdims3)
 
-    X4 = RB.fan == true ? RB.activation.forward(Y3) : GaLU(Y3)
-    save && (return Y1, Y2, Y3, X2, X3, X4)
-    return X4
+    X4 = _fan_out(Y3, RB.fan)
+    return Y1, Y2, Y3, X2, X3, X4
 end
 
 # Backward
@@ -171,8 +199,9 @@ function block_backward(ΔX4::AbstractArray{T, N}, X1::AbstractArray{T, N},
     cdims2 = DenseConvDims(Y2, RB.W2.data; stride=RB.strides[2], padding=RB.pad[2])
     cdims3 = DCDims(X1, RB.W3.data;  stride=RB.strides[1], padding=RB.pad[1])
 
-    # Backpropagate residual ΔX4 and compute gradients
-    RB.fan == true ? (ΔY3 = backward(ΔX4, Y3, X4, RB.activation)) : (ΔY3 = GaLUgrad(ΔX4, Y3))
+    # Backpropagate residual ΔX4 and compute gradients. `fan=true` is a linear output, so
+    # its cotangent passes straight through.
+    ΔY3 = RB.fan ? ΔX4 : GaLUgrad(ΔX4, Y3)
     ΔX3 = conv(ΔY3, RB.W3.data, cdims3)
     ΔW3 = ∇conv_filter(ΔY3, X3, cdims3)
 
@@ -225,9 +254,8 @@ function jacobian(ΔX1::AbstractArray{T, N}, Δθ::AbstractVector{<:Parameter},
     cdims3 = DCDims(X1, RB.W3.data; nc=2*size(X1, N-1), stride=RB.strides[1], padding=RB.pad[1])
     Y3 = ∇conv_data(X3, RB.W3.data, cdims3)
     ΔY3 = ∇conv_data(ΔX3, RB.W3.data, cdims3) + ∇conv_data(X3, Δθ[3].data, cdims3)
-    if RB.fan == true
-        X4 = RB.activation.forward(Y3)
-        ΔX4 = backward(ΔY3, Y3, X4, RB.activation)
+    if RB.fan
+        X4, ΔX4 = Y3, ΔY3
     else
         ΔX4, X4 = GaLUjacobian(ΔY3, Y3)
     end

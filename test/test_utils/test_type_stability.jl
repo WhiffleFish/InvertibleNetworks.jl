@@ -60,5 +60,55 @@ inferred_type(f, argtypes...) = only(Base.return_types(f, Tuple{argtypes...}))
             abstract_fields = [f for (f, ft) in zip(fieldnames(T), T.types) if !isconcretetype(ft)]
             @test isempty(abstract_fields)
         end
+        for layer in (MLPBlock(4, 8), MLPBlock(4, 8; fan=true))
+            T = typeof(layer)
+            @test isempty([f for (f, ft) in zip(fieldnames(T), T.types) if !isconcretetype(ft)])
+        end
+    end
+end
+
+@testset "Dense/vector path inference" begin
+    V = randn(Float32, 8, 32)      # (dim, batch)
+
+    # The hot path is `block_forward`/`block_forward_save`, which pass a `Val` literal. The
+    # public `forward(X, B; save)` takes `save` as a runtime `Bool`, so its return type is a
+    # union over both -- true of `ResidualBlock` too, and why the `block_*` entry points exist.
+    mlp = MLPBlock(8, 16; fan=true)
+    @test inferred_type(InvertibleNetworks.block_forward, typeof(V), typeof(mlp)) ==
+          Matrix{Float32}
+    @test inferred_type(InvertibleNetworks._forward, typeof(V), typeof(mlp), Val{false}) ==
+          Matrix{Float32}
+    @test isconcretetype(inferred_type(InvertibleNetworks._forward, typeof(V), typeof(mlp),
+                                       Val{true}))
+
+    # A dense coupling layer on plain vectors, with and without the log-determinant
+    @test inferred_type(InvertibleNetworks.forward, typeof(V),
+                        typeof(CouplingLayerGlow(8, 16; dense=true))) == Matrix{Float32}
+    @test inferred_type(InvertibleNetworks.forward, typeof(V),
+                        typeof(CouplingLayerGlow(8, 16; dense=true, logdet=true))) ==
+          Tuple{Matrix{Float32},Float32}
+    @test inferred_type(InvertibleNetworks._forward, typeof(V),
+                        typeof(CouplingLayerGlow(8, 16; dense=true, logdet=true)),
+                        Val{:sample}) == Tuple{Matrix{Float32},Vector{Float32}}
+
+    # The chain now accumulates per sample internally and reduces once, which must not widen
+    # the scalar it returns.
+    flow = InvertibleChain(ActNorm(8; logdet=true),
+                           CouplingLayerGlow(8, 16; logdet=true, dense=true))
+    @test inferred_type(InvertibleNetworks.forward, typeof(V), typeof(flow)) ==
+          Tuple{Matrix{Float32},Float32}
+    @test inferred_type(InvertibleNetworks._chain_forward, typeof(V), typeof(flow), Val{true}) ==
+          Tuple{Matrix{Float32},Float32}
+end
+
+@testset "Channel views" begin
+    for X in (randn(Float32, 8, 8, 4, 3), randn(Float32, 8, 6))
+        a, b = InvertibleNetworks.channel_halves(X)
+        ta, tb = InvertibleNetworks.tensor_split(X)
+        @test a == ta && b == tb
+        @test size(a) == size(ta) && size(b) == size(tb)
+        # Views, not copies: writing through one is visible in the parent
+        a[1] = 42f0
+        @test X[1] == 42f0
     end
 end
