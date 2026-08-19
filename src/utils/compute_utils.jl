@@ -2,6 +2,7 @@ using CUDA
 
 export convert_cu, cuzeros, cuones, array_of_array, chain_lr
 export householder_matrix, householder_reflector, apply_channel_matrix
+export householder_product, householder_grad
 
 convert_cu(in_a, X) =  X isa CuArray ? cu(in_a) : in_a
 cuzeros(::Array{T, N}, a::Vararg{Int, N2}) where {T, N, N2} = zeros(T, a...)
@@ -64,6 +65,40 @@ end
 """
 householder_matrix(vi::Vararg{AbstractVector{T}, N}) where {T, N} =
     chain_lr(eye_like(vi[1], length(vi[1])), vi...)
+
+# Non-mutating form of the product `householder_matrix` builds.
+#
+# `chain_lr` assembles that matrix with in-place BLAS calls, which is the right way to compute
+# it and the wrong way to differentiate it: automatic differentiation cannot see through the
+# mutation. Each step here is one matrix-vector product plus one rank-1 update, so the whole
+# product stays `O(k^2)`, and it is only ever evaluated on `k x k` matrices with no batch
+# dimension -- the temporaries it allocates cost nothing next to what they buy.
+_reflect(M::AbstractMatrix, v::AbstractVector) = M .- (2/dot(v, v)) .* ((M*v) * adjoint(v))
+
+householder_product(E::AbstractMatrix, v::AbstractVector) = _reflect(E, v)
+householder_product(E::AbstractMatrix, v::AbstractVector, vs::AbstractVector...) =
+    householder_product(_reflect(E, v), vs...)
+
+"""
+    Δv... = householder_grad(Q̄, v...)
+
+ Gradient of `dot(householder_matrix(v...), Q̄)` with respect to each reflector vector, i.e.
+ the pullback of `v... -> Q` evaluated at the cotangent `Q̄`.
+
+ The matrix a `Conv1x1` applies is the same for every sample, so a weight gradient through it
+ factors into two independent pieces: the cotangent of `Q`, which is the only part that touches
+ the data (see `channel_gram`), and this pullback, which is pure `k x k` algebra with no batch
+ dimension in it at all. Differentiating that second piece rather than hand-rolling it keeps the
+ three-reflector chain rule in one place -- and since it is batch-independent, the cost of doing
+ so is paid once per call regardless of how much data the layer is processing.
+
+ See also: [`householder_matrix`](@ref), [`householder_product`](@ref)
+"""
+function householder_grad(Q̄::AbstractMatrix{T}, v::Vararg{AbstractVector{T}, N}) where {T, N}
+    E = eye_like(v[1], length(v[1]))
+    _, back = Flux.pullback((vs...) -> householder_product(E, vs...), v...)
+    return back(Q̄)
+end
 
 """
     Y = apply_channel_matrix(X, Q)

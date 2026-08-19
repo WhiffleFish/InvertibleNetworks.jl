@@ -364,3 +364,59 @@ Cr2 = Conv1x1(copy(Cb.v1.data), copy(Cb.v2.data), copy(Cb.v3.data))
 clear_grad!(Cr2)
 ΔYt, _ = Cr2.forward((copy(ΔYb), copy(Xr)))
 @test ΔYr ≈ ΔYt
+
+
+###################################################################################################
+# The weight gradient is factored into a data contraction (`channel_gram`) and a pullback of
+# `v... -> Q` (`householder_grad`). Both halves are pinned here: the end-to-end finite-difference
+# tests above cover their composition, but not which of the two is wrong when one of them is.
+
+@testset "Householder product and pullback" begin
+    for k in (4, 9, 16)
+        v1, v2, v3 = randn(Float32, k), randn(Float32, k), randn(Float32, k)
+        E = InvertibleNetworks.eye_like(v1, k)
+
+        # The differentiable form has to agree with the in-place BLAS one it replaces...
+        Q = householder_matrix(v1, v2, v3)
+        @test isapprox(Q, householder_product(E, v1, v2, v3); rtol=1f-5)
+        # ...and the matrix is still orthogonal
+        @test isapprox(Q*Q', Matrix{Float32}(I, k, k); atol=1f-5)
+
+        # The pullback matches a finite difference of `dot(Q, Q̄)`
+        Q̄ = randn(Float32, k, k)
+        g = householder_grad(Q̄, v1, v2, v3)
+        f(a, b, c) = dot(householder_matrix(a, b, c), Q̄)
+        h = 1f-3
+        for (i, v) in enumerate((v1, v2, v3))
+            dv = randn(Float32, k)
+            args_p = Any[copy(v1), copy(v2), copy(v3)]; args_p[i] = v .+ (h/2).*dv
+            args_m = Any[copy(v1), copy(v2), copy(v3)]; args_m[i] = v .- (h/2).*dv
+            @test isapprox(dot(g[i], dv), (f(args_p...) - f(args_m...))/h; rtol=1f-2)
+        end
+    end
+end
+
+@testset "channel_gram is the cotangent of Q" begin
+    # `Y = X * Q` over the channel axis, so `∂L/∂Q = Σ X' ΔY` -- which is what `channel_gram`
+    # must return for the factorization to be correct.
+    for sz in ((6, 6, 8, 5), (8, 4), (1, 1, 4, 3))
+        k = sz[max(1, length(sz)-1)]
+        X, ΔY = randn(Float32, sz...), randn(Float32, sz...)
+        Xm = reshape(X, :, k, sz[end])
+        ΔYm = reshape(ΔY, :, k, sz[end])
+        ref = sum(adjoint(Xm[:, :, b]) * ΔYm[:, :, b] for b in 1:sz[end])
+        @test isapprox(InvertibleNetworks.channel_gram(X, ΔY), ref; rtol=1f-4)
+    end
+end
+
+@testset "weight gradient is batch-independent work" begin
+    # The gradient must not depend on how the same total contraction was batched: doubling the
+    # batch with a copy doubles the Gram matrix and hence the gradient exactly.
+    C = Conv1x1(8)
+    X, ΔY = randn(Float32, 8, 16), randn(Float32, 8, 16)
+    g1 = InvertibleNetworks.conv1x1_grad_v(X, ΔY, C)
+    g2 = InvertibleNetworks.conv1x1_grad_v(hcat(X, X), hcat(ΔY, ΔY), C)
+    for (a, b) in zip(g1, g2)
+        @test isapprox(2 .* a, b; rtol=1f-4)
+    end
+end

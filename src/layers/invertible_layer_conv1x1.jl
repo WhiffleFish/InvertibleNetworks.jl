@@ -70,62 +70,19 @@ function Conv1x1(v1, v2, v3;freeze=false, logdet=false)
     return Conv1x1(k, v1, v2, v3, logdet, freeze)
 end
 
-function partial_derivative_outer(v::AbstractArray{T, 1}) where T
-    k = length(v)
-    out1 = v * v'
-    n = v' * v
-    outer = cuzeros(v, k, k, k)
-    for i=1:k
-        copyto!(view(outer, i, :, :), out1)
-    end
-    broadcast!(*, outer, v, outer)
-    broadcast!(*, outer, -2/n, outer)
-    for j=1:k
-        v1 = view(outer,j, :, j)
-        broadcast!(+, v1, v1, v)
-        v1 = view(outer,j, j, :)
-        broadcast!(+, v1, v1, v)
-    end
-    broadcast!(*, outer, 1/n, outer)
-    return outer
-end
-
-function partial_derivative_outer(v::CuArray{T, 1}) where T
-    k = length(v)
-    out1 = v * v'
-    n = v' * v
-    outer = cuzeros(v, k, k, k)
-    for i=1:k
-        copyto!(view(outer, i, :, :), out1)
-    end
-    broadcast!(*, outer, v, outer)
-    broadcast!(*, outer, -2/n, outer)
-    for j=1:k
-        v1 = view(outer,j, :, j)
-        broadcast!(+, v1, v1, v)
-        v1 = view(outer,j, j, :)
-        broadcast!(+, v1, v1, v)
-    end
-    broadcast!(*, outer, 1/n, outer)
-    return outer
-end
-
-
-# Everything the Householder weight gradients need from the data: the channel-by-channel
-# Gram matrix `-2 * Σ_i X_i' * ΔY_i`, summed over samples and spatial positions. Each `∂V`
-# slice then enters as a plain inner product against it, because
+# The cotangent of the `k x k` matrix the layer applies: `Q̄ = Σ_i X_i' * ΔY_i`, summed over
+# samples and spatial positions.
 #
-#     sum((-2 X_i * ∂V[m]) .* ΔY_i) = ⟨∂V[m], -2 X_i' ΔY_i⟩,
-#
-# so the contraction over the batch can happen once instead of once per `∂V` slice per
-# sample. The former per-sample `Mat * Tens[i, :, :]` products rebuilt this same quantity one
-# tiny matrix at a time and allocated far more than they computed.
+# `Y[s, c', b] = Σ_c X[s, c, b] * Q[c, c']`, so `∂L/∂Q[c, c'] = Σ_{s,b} X[s, c, b] ΔY[s, c', b]`
+# -- exactly this Gram matrix. It is the *only* place the weight gradient touches the data:
+# everything downstream of it is `k x k` algebra with no batch dimension, which is what lets
+# `householder_grad` do the rest at a cost independent of the batch size.
 function channel_gram(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N}) where {T, N}
     k, batchsize = size(X, N-1), size(X, N)
     Xm, ΔYm = reshape(X, :, k, batchsize), reshape(ΔY, :, k, batchsize)
     G = cuzeros(X, k, k)
     @inbounds for i = 1:batchsize
-        mul!(G, adjoint(view(Xm, :, :, i)), view(ΔYm, :, :, i), T(-2), one(T))
+        mul!(G, adjoint(view(Xm, :, :, i)), view(ΔYm, :, :, i), one(T), one(T))
     end
     return G
 end
@@ -135,61 +92,35 @@ function channel_gram(X::CuArray{T, N}, ΔY::CuArray{T, N}) where {T, N}
     k, batchsize = size(X, N-1), size(X, N)
     Xm, ΔYm = reshape(X, :, k, batchsize), reshape(ΔY, :, k, batchsize)
     G = NNlib.batched_mul(NNlib.batched_adjoint(Xm), ΔYm)
-    return T(-2) .* dropdims(sum(G; dims=3); dims=3)
+    return dropdims(sum(G; dims=3); dims=3)
 end
 
+# Gradient of the loss with respect to the three Householder vectors.
+#
+# The layer applies one `k x k` matrix `Q = H(v1)H(v2)H(v3)` to every sample, so this gradient
+# factors cleanly in two: `channel_gram` contracts the data down to `Q̄ = ∂L/∂Q`, and
+# `householder_grad` pulls that back through `v... -> Q`. Only the first piece sees the batch;
+# the second is `k x k` algebra whose cost does not depend on how much data went in.
+#
+# The previous version instead materialized `∂V_i/∂v_i` as a `k x k x k` tensor for each
+# reflector and hit every one of its `k` slices with a `k x k` matrix multiply -- `O(k^4)` work
+# and `O(k^3)` memory, recomputed identically on every backward pass no matter the batch size.
+# For a vector flow at `k = 128` that term alone was ~190x the cost of the entire rest of the
+# gradient.
+#
+# `adjoint=true` is for the reversed direction, which applies `Q'`: the cotangent of `Q` is then
+# the transpose of the one the forward direction would report.
 function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
                         C::Conv1x1; adjoint=false) where {T, N}
+    k = length(C.v1.data)
 
-    # Reshape input
-    v1 = C.v1.data
-    v2 = C.v2.data
-    v3 = C.v3.data
-    k = length(v1)
+    # Do not calculate gradients if layer is frozen (not learnable)
+    C.freeze && return cuzeros(X, k), cuzeros(X, k), cuzeros(X, k)
 
-    dv1 = cuzeros(X, k)
-    dv2 = cuzeros(X, k)
-    dv3 = cuzeros(X, k)
-
-    # Do not calculate gradients if layer is frozen
-    if C.freeze 
-        return dv1, dv2, dv3 
-    end
-
-    V1 = v1*v1'/(v1'*v1)
-    V2 = v2*v2'/(v2'*v2)
-    V3 = v3*v3'/(v3'*v3)
-
-    dV1 = partial_derivative_outer(v1)
-    dV2 = partial_derivative_outer(v2)
-    dV3 = partial_derivative_outer(v3)
-
-    M1 = (I - 2 * (V2 + V3) + 4*V2*V3)
-    M3 = (I - 2 * (V1 + V2) + 4*V1*V2)
-    tmp = cuzeros(X, k, k)
-    for i=1:k
-        # dV1
-        mul!(tmp, dV1[i, :, :], M1)
-        @views copyto!(dV1[i, :, :], tmp)
-        # dV2
-        v2 = dV2[i, :, :]
-        broadcast!(+, tmp, v2, 4 * V1 * v2 * V3 - 2 * (V1 * v2 + v2 * V3))
-        @views copyto!(dV2[i, :, :], tmp)
-        # dV3
-        mul!(tmp, M3, dV3[i, :, :])
-        @views copyto!(dV3[i, :, :], tmp)
-    end
-
-    # The `∂V` slices used to be transposed one at a time above; `⟨A', G⟩ == ⟨A, G'⟩` moves
-    # that single transpose onto the k x k Gram matrix instead.
     G = channel_gram(X, ΔY)
-    g = vec(adjoint ? permutedims(G) : G)
-    mul!(dv1, reshape(dV1, k, k*k), g)
-    mul!(dv2, reshape(dV2, k, k*k), g)
-    mul!(dv3, reshape(dV3, k, k*k), g)
-    return dv1, dv2, dv3
+    Q̄ = adjoint ? permutedims(G) : G
+    return householder_grad(Q̄, C.v1.data, C.v2.data, C.v3.data)
 end
-
 
 # Forward pass
 #
