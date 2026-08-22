@@ -249,36 +249,85 @@ end
     return mod.(x .+ B, 2B) .- B, true
 end
 
-# Which bin each value falls in: a one-hot over the bin axis, the "strictly earlier bins" mask
-# that the cumulative knots differentiate through, and the index itself.
-@inline function _bin_masks(t, edges, K::Int, ::Val{D}) where {D}
-    k  = clamp.(sum(t .>= edges; dims=D), 1, K)
-    ax = _binaxis(Val(ndims(edges)), Val(D), K)
-    return (ax .== k), (ax .< k), k
+# Which bin each value falls in, as an index along the bin axis.
+@inline _bin_index(t, edges, K::Int, ::Val{D}) where {D} =
+    clamp.(sum(t .>= edges; dims=D), 1, K)
+
+# Stride of axis `m`, for the dense arrays `spline_knots` produces -- every field of
+# `SplineKnots` is a freshly materialized broadcast, `cumsum` or `cat`, so a size product is
+# the true stride.
+@inline function _axis_stride(A::AbstractArray, m::Int)
+    s = 1
+    for i in 1:m-1
+        s *= size(A, i)
+    end
+    return s
 end
 
-@inline _gather(field, mask, ::Val{D}) where {D} = sum(field .* mask; dims=D)
+# One axis's contribution to a linear index into `field`, laid out along that axis.
+#
+# The bin axis contributes nothing here -- `_bin_linear` adds its term from `k` instead -- but it
+# still returns a range rather than a plain `0`, so that the tuple of offsets is homogeneous.
+# With a `Union{Int,ReshapedArray}` element type inference gives up and the return type of a
+# spline forward pass stops being concrete, which the type-stability tests catch.
+#
+# Offsets are *strided* ranges rather than `range .* stride`: the latter materializes a host
+# `Array`, which then has to be copied into any GPU broadcast it meets.
+@inline function _axis_offset(field::AbstractArray, m::Int, ::Val{ND}, ::Val{D}) where {ND,D}
+    # `0:1:0` is the single offset 0 -- a zero *step* is not a legal range, and the step is
+    # irrelevant for a length-1 range.
+    m == D && return reshape(0:1:0, ntuple(_ -> 1, Val(ND)))
+    st, n = _axis_stride(field, m), size(field, m)
+    return reshape(0:st:st*(n-1), ntuple(i -> i == m ? n : 1, Val(ND)))
+end
 
-# δ at the two ends of the active bin: the padded array has K+1 entries, so bin `k` runs from
-# entry `k` to entry `k+1`.
-@inline function _gather_derivs(deriv, k, K::Int, ::Val{D}) where {D}
-    ax = _binaxis(Val(ndims(deriv)), Val(D), K+1)
-    return _gather(deriv, ax .== k, Val(D)), _gather(deriv, ax .== k .+ 1, Val(D))
+# Linear indices that read `field` at bin `k`, one per element of `k`.
+#
+# This is the gather that `sum(field .* (axis .== k); dims=D)` was performing. That form
+# multiplies and reduces the entire bin axis in order to keep one entry of it, so it does `K`
+# times the arithmetic and allocates two `K`-wide temporaries on the way; at `K = 8` bins it was
+# the largest single cost in a spline coupling layer.
+#
+# The offsets follow each of the *field's* own axes, so a field whose axis is singleton where
+# the data's is not broadcasts across it exactly as it did under the masked sum. That is the
+# case for [`SplineLayer`](@ref), whose knots are the layer's own parameters and carry neither
+# the spatial extent nor the batch.
+@inline function _bin_linear(field::AbstractArray, k, ::Val{ND}, ::Val{D}) where {ND,D}
+    off = ntuple(m -> _axis_offset(field, m, Val(ND), Val(D)), Val(ND))
+    return broadcast(+, 1 .+ (k .- 1) .* _axis_stride(field, D), off...)
 end
 
 # Everything the spline formulas need for the bin each value landed in.
-@inline function _active_bin(t, edges, kn::SplineKnots, spec::SplineSpec, ::Val{D}) where {D}
-    K = spec.nbins
-    hot, lt, k = _bin_masks(t, edges, K, Val(D))
-    dl, dr = _gather_derivs(kn.deriv, k, K, Val(D))
-    return (hot = hot, lt = lt,
-            wk = _gather(kn.binw, hot, Val(D)), hk = _gather(kn.binh, hot, Val(D)),
-            xk = _gather(kn.left, hot, Val(D)), yk = _gather(kn.bottom, hot, Val(D)),
-            dl = dl, dr = dr, λ = _gather_lambda(kn.lambda, hot, Val(D)))
+#
+# `masks` asks for the one-hot and the "strictly earlier bins" mask over the bin axis. Only the
+# VJP scatters onto that axis and needs them; `spline_forward` and `spline_inverse` were paying
+# for two `K`-wide boolean arrays they never read.
+@inline function _active_bin(t, edges, kn::SplineKnots, spec::SplineSpec, ::Val{D},
+                             ::Val{masks}) where {D,masks}
+    K  = spec.nbins
+    ND = ndims(edges)
+    k  = _bin_index(t, edges, K, Val(D))
+
+    # One index array serves every field with a `K`-long bin axis: they are all slices of the
+    # same parameter tensor, so they all share a shape.
+    ik = _bin_linear(kn.binw, k, Val(ND), Val(D))
+
+    # The padded derivatives are `K+1` long and so need their own; bin `k` runs from entry `k`
+    # to entry `k+1`, one bin-axis stride further along.
+    id = _bin_linear(kn.deriv, k, Val(ND), Val(D))
+    sd = _axis_stride(kn.deriv, D)
+
+    return (hot = masks ? _binaxis(Val(ND), Val(D), K) .== k : nothing,
+            lt  = masks ? _binaxis(Val(ND), Val(D), K) .< k : nothing,
+            k = k,
+            wk = kn.binw[ik], hk = kn.binh[ik],
+            xk = kn.left[ik], yk = kn.bottom[ik],
+            dl = kn.deriv[id], dr = kn.deriv[id .+ sd],
+            λ = _gather_lambda(kn.lambda, ik))
 end
 
-@inline _gather_lambda(::Nothing, hot, ::Val) = nothing
-@inline _gather_lambda(λ, hot, ::Val{D}) where {D} = _gather(λ, hot, Val(D))
+@inline _gather_lambda(::Nothing, ik) = nothing
+@inline _gather_lambda(λ, ik) = λ[ik]
 
 
 ###################################################################################################
@@ -395,7 +444,7 @@ end
 function spline_forward(x::AbstractArray{T}, kn::SplineKnots, spec::SplineSpec,
                         ::Val{D}) where {T,D}
     xc, inside = _domain(x, spec)
-    b = _active_bin(xc, kn.left, kn, spec, Val(D))
+    b = _active_bin(xc, kn.left, kn, spec, Val(D), Val(false))
     y, lg = _value((xc .- b.xk) ./ b.wk, b, spec)
     return ifelse.(inside, y, x), ifelse.(inside, lg, zero(T))
 end
@@ -410,7 +459,7 @@ end
 function spline_inverse(y::AbstractArray{T}, kn::SplineKnots, spec::SplineSpec,
                         ::Val{D}) where {T,D}
     yc, inside = _domain(y, spec)
-    b = _active_bin(yc, kn.bottom, kn, spec, Val(D))
+    b = _active_bin(yc, kn.bottom, kn, spec, Val(D), Val(false))
     ξ = clamp.(_root(yc .- b.yk, b, spec), zero(T), one(T))
     _, lg = _value(ξ, b, spec)
     return ifelse.(inside, b.xk .+ ξ .* b.wk, y), ifelse.(inside, lg, zero(T))
@@ -437,7 +486,7 @@ function spline_vjp(Δy::AbstractArray{T}, Δl, x::AbstractArray{T}, kn::SplineK
                     spec::SplineSpec, ::Val{D}) where {T,D}
     K = spec.nbins
     xc, inside = _domain(x, spec)
-    b  = _active_bin(xc, kn.left, kn, spec, Val(D))
+    b  = _active_bin(xc, kn.left, kn, spec, Val(D), Val(true))
     gx, gw, gh, gdl, gdr, gλ = _bin_vjp(Δy, Δl, (xc .- b.xk) ./ b.wk, b, spec)
 
     # Outside the spline interval the map is the identity: the input passes its residual through
@@ -550,8 +599,8 @@ function _deriv_vjp(gdl, gdr, b, kn::SplineKnots, spec::SplineSpec, ::Val{D}) wh
     T  = eltype(kn.deriv)
     K  = spec.nbins
     ax = _binaxis(Val(ndims(kn.deriv)), Val(D), K+1)
-    k  = sum(b.hot .* _binaxis(Val(ndims(b.hot)), Val(D), K); dims=D)
-    Δδ = gdl .* (ax .== k) .+ gdr .* (ax .== k .+ 1)
+    # The bin index comes along with the gathered bin, so it needs no recovering from the mask.
+    Δδ = gdl .* (ax .== b.k) .+ gdr .* (ax .== b.k .+ 1)
     δ  = _internal_derivs(kn.deriv, spec, Val(D))
     return _unpad_derivs(Δδ, spec, Val(D)) .*
            _dsoftplus_β.(δ .- T(spec.min_derivative), _softplus_beta(spec, T))

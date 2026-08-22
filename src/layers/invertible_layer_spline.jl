@@ -211,13 +211,13 @@ function CouplingLayerSpline(n_in::Int64, n_hidden::Int64; spline=:rqs, nbins=8,
     out_chan  = n_trans * n_spline_params(spec)
 
     if dense
-        isnothing(nx) && error("Dense network needs nx as kwarg input")
-        init = zi ? Flux.zeros32 : Flux.glorot_uniform
-        RB = FluxBlock(Chain(x -> reshape(x, nx*n_read, :),
-                             Dense(nx*n_read, n_in*n_hidden, relu),
-                             Dense(n_in*n_hidden, n_in*n_hidden, relu),
-                             Dense(n_in*n_hidden, nx*out_chan; init=init),
-                             x -> reshape(x, nx, out_chan, :)))
+        # `nx` is the spatial extent the dense block flattens over. A flow on plain
+        # `(dim, batch)` vectors has none, so it defaults to 1 rather than being required.
+        # `fan=false` gates the output exactly as the convolutional branch does, hence the
+        # doubled `d_out`.
+        d = isnothing(nx) ? 1 : prod(nx)
+        RB = MLPBlock(d*n_read, n_hidden; d_out=2*d*out_chan, fan=false)
+        zi && fill!(RB.W3.data, 0)
     else
         # `fan=false` asks the residual block for a gated linear output rather than the
         # activation it applies when `fan=true`. That matters here: with the default ReLU the

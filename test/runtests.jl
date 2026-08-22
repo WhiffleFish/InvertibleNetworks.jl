@@ -20,7 +20,8 @@ basics = ["test_utils/test_objectives.jl",
           "test_utils/test_type_stability.jl",
           "test_utils/test_jacobian.jl",
           "test_utils/test_chainrules.jl",
-          "test_utils/test_flux.jl"]
+          "test_utils/test_flux.jl",
+          "test_utils/test_gpu_parity.jl"]
 
           # Layers
 layers = ["test_layers/test_residual_block.jl",

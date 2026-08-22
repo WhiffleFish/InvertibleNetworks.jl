@@ -49,7 +49,7 @@ end
 @testset "identity init is the magnet, for every context" begin
     net = boxchain()
     lp = log_likelihood_per_sample(X, Ctx, net; base, normalized = true)
-    @test all(≈(-d * log(2B); atol = 1e-5), lp)          # exactly uniform on the box
+    @test all(≈(-d * log(2Bbox); atol = 1e-5), lp)       # exactly uniform on the box
     # ... and it stays uniform when the context changes. A conditioner whose zeroed output layer
     # left any live path from the context would fail here and nowhere else.
     @test lp ≈ log_likelihood_per_sample(X, 5 .* Ctx, net; base, normalized = true)
@@ -84,7 +84,7 @@ end
     Xg = reshape(Float32[c == 1 ? x : y for c in 1:2, x in g, y in g], 1, 1, d, G * G)
     c1 = repeat(reshape(Ctx[1, 1, :, 1], 1, 1, nc, 1), 1, 1, 1, G * G)
     lp = log_likelihood_per_sample(Xg, c1, net; base, normalized = true)
-    @test sum(exp.(lp)) * (2B / (G - 1))^2 ≈ 1 atol=2e-2
+    @test sum(exp.(lp)) * (2Bbox / (G - 1))^2 ≈ 1 atol=2e-2
 end
 
 @testset "gradient w.r.t. the context, against finite differences" begin

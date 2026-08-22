@@ -41,8 +41,14 @@ block_forward(X, FB::FluxBlock) = forward(X, FB)
 # A `FluxBlock` differentiates through Zygote, which builds its own forward states inside
 # `backward`, so there is nothing extra worth carrying here: the saved state is the output.
 block_forward_save(X, FB::FluxBlock) = forward(X, FB)
-block_backward(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, ::AbstractArray,
-               FB::FluxBlock; set_grad::Bool=true) where {T, N} =
+
+# `ΔY` carries the rank of the chain's *output*, which need not be the rank of its input: a
+# chain that reshapes -- as one standing in for a conditioner over vector data does -- hands
+# back a cotangent of its own shape. Tying the two ranks together left any such block with no
+# applicable method, which surfaced as a `MethodError` from inside the coupling layer rather
+# than as anything to do with the chain.
+block_backward(ΔY::AbstractArray, X::AbstractArray, ::AbstractArray,
+               FB::FluxBlock; set_grad::Bool=true) =
     backward(ΔY, X, FB; set_grad=set_grad)
 
 #######################################################################################################################
@@ -80,7 +86,7 @@ end
 
 
 # Backward 2D
-function backward(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, FB::FluxBlock; set_grad::Bool=true) where {T, N}
+function backward(ΔY::AbstractArray, X::AbstractArray, FB::FluxBlock; set_grad::Bool=true)
     
     # Differentiate explicitly with respect to both the Flux model and input.
     _, back = Flux.pullback((model, input) -> model(input), FB.model, X)
@@ -110,7 +116,7 @@ function jacobian(::AbstractArray{T, N}, ::AbstractVector{<:Parameter}, ::Abstra
     throw(ArgumentError("Jacobian for Flux block not yet implemented"))
 end
 
-function adjointJacobian(ΔY::AbstractArray{T, N}, X::AbstractArray{T, N}, FB::FluxBlock) where {T, N}
+function adjointJacobian(ΔY::AbstractArray, X::AbstractArray, FB::FluxBlock)
     return backward(ΔY, X, FB; set_grad=false)
 end
 
